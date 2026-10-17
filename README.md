@@ -5,6 +5,14 @@
 > **版本狀態：離線原型＋共用版機制已實作，但「正式共用版」尚未在機關實際共用槽完成環境驗收。**
 > 啟動畫面橫幅會明示「離線原型」或共用槽版本；共用槽未通過鎖定／不可分割替換驗證時，正式編輯模式自動停用（T32）。
 
+## 0. 不打包直接開啟（Windows，給第一次使用者）
+
+1. 安裝 Python 3.12：到 https://www.python.org/downloads/windows/ 下載「Windows installer (64-bit)」，安裝第一個畫面**勾選「Add python.exe to PATH」**再按 Install Now。（機關電腦若不能自行安裝，請資訊單位代裝。）
+2. 下載程式：GitHub 本專案頁 → 切到分支 `ccr-77e3d4b8-ar999t` → 綠色「Code」→「Download ZIP」→ 解壓縮到例如 `D:\specdrug`。
+3. 點兩下 `start_windows.bat`。第一次會花約1分鐘準備（需能連 pypi.org 下載 openpyxl、tzdata），之後點兩下即開。
+4. 想先看範例：關閉系統視窗後點兩下 `demo_data_windows.bat`，再開 `start_windows.bat`。
+5. 沒有 `config.json` 時是**離線原型**，資料只在自己電腦 `%LOCALAPPDATA%\specdrug\offline\`；刪除該資料夾即清空。
+
 ## 1. 啟動與停止
 
 | 情境 | 方式 |

@@ -13,6 +13,7 @@ from specdrug import cases as C  # noqa: E402
 from specdrug import master_import as M  # noqa: E402
 from specdrug import pricing as P  # noqa: E402
 from specdrug import recognition as R  # noqa: E402
+from specdrug.auth import os_account  # noqa: E402
 from specdrug.workspace import Workspace  # noqa: E402
 
 ROWS = [
@@ -28,7 +29,7 @@ HEAD = ["CODE", "藥品名稱", "藥商名稱", "分組代碼", "ATC7碼", "PDOS
 
 def main(local_dir):
     local = Path(local_dir)
-    ws = Workspace(local, None, "demo")
+    ws = Workspace(local, None, os_account())  # 與開啟系統的Windows帳號相同，才有編輯權限
     ctx = ws.ctx()
     src = local / "demo_master.csv"
     with open(src, "w", encoding="utf-8", newline="") as f:
