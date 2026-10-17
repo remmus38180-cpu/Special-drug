@@ -1,0 +1,5 @@
+{
+  "_說明": "複製為 config.json 放在執行檔同一資料夾。未設定 store_root 時為離線原型。",
+  "store_root": "\\\\fileserver\\科內共用\\specdrug",
+  "local_dir": null
+}

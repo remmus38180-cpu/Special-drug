@@ -1,0 +1,6 @@
+# 執行期
+openpyxl==3.1.5
+tzdata>=2024.1
+# 開發／打包
+pytest>=8
+pyinstaller==6.11.1
