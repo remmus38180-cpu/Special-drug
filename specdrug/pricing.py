@@ -306,7 +306,7 @@ def annotation_on(con, drug_code, day=None) -> dict:
 
 
 def compare_master(con, import_id, day=None) -> list[dict]:
-    """主檔註記比對：一致／應有未有／主檔有但無完整依據／類別不同／無法判定。不直接更新正式主檔。"""
+    """主檔必要藥品註記（DRUG_NECESSARY）比對：一致／應有未有／主檔有但無完整依據／類別不同／無法判定。不直接更新正式主檔。"""
     day = day or today()
     cmap = json.loads(get_setting(con, "annotation_code_map", "{}"))
     rev_map = {v: k for k, v in cmap.items()}
@@ -327,14 +327,14 @@ def compare_master(con, import_id, day=None) -> list[dict]:
         elif sys_state["unknown_date"] and sys_cat is None:
             res, why = "無法判定", "系統註記生效日未知"
         elif raw not in rev_map and raw not in (None, "", "0") :
-            res, why = "無法判定", f"主檔註記值 {raw} 無對照設定"
+            res, why = "無法判定", f"必要藥品註記值 {raw} 無對照設定"
         else:
             m_cat = rev_map.get(raw)
             if sys_cat and m_cat:
                 res = "一致" if cmap.get(sys_cat) == raw else "類別不同"
                 why = f"系統：{sys_cat}；主檔：{m_cat}"
             elif sys_cat and not m_cat:
-                res, why = "應有未有", f"系統：{sys_cat}；主檔未註記"
+                res, why = "應有未有", f"系統：{sys_cat}；主檔必要藥品註記未標示"
             elif m_cat and not sys_cat:
                 res, why = "主檔有但無完整依據", f"主檔：{m_cat}；系統無已確認註記"
             else:

@@ -133,7 +133,7 @@ class DrugTab(ttk.Frame):
         self.table = W.Table(pw, [("drug_code", "代碼", 110), ("drug_name", "品名", 260), ("firm", "藥商", 160),
                                   ("group_code", "分組", 120), ("atc_code", "ATC", 80), ("dose_name", "劑型", 100),
                                   ("spec_qty", "規格", 60), ("spec_unit", "單位", 50), ("price", "支付價", 70),
-                                  ("annotation_raw", "主檔註記", 70)], height=10, on_select=self.show)
+                                  ("annotation_raw", "必要藥品註記", 90)], height=10, on_select=self.show)
         pw.add(self.table, weight=2)
         self.detail = tk.Text(pw, height=16, font=W.FONT, wrap="word")
         pw.add(self.detail, weight=3)
@@ -169,7 +169,7 @@ class DrugTab(ttk.Frame):
                      f"{'；有生效日未知事件' if d['annotation']['unknown_date'] else ''}")
         for m in d["master"][:3]:
             lines.append(f"主檔 {m['source_name']}（基準 {m['base_date'] or '未指定'}）：{m['drug_name']}｜分組 {m['group_code']}"
-                         f"｜支付價 {m['price']}｜註記原值 {m['annotation_raw']}")
+                         f"｜支付價 {m['price']}｜必要藥品註記 {m['annotation_raw']}")
         lines.append("—— 完整時間序列 ——")
         for e in d["events"]:
             lines.append(f"{e['date'] or '日期待確認'}｜{e['kind']}｜{e['text']}{'｜' + e['status'] if e['status'] else ''}")
@@ -319,7 +319,7 @@ class DiffTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x")
         ttk.Button(top, text="記錄處理結論", command=self.resolve).pack(side="left")
-        ttk.Button(top, text="主檔註記比對", command=self.compare).pack(side="left", padx=4)
+        ttk.Button(top, text="必要藥品註記比對", command=self.compare).pack(side="left", padx=4)
         ttk.Button(top, text="匯出", command=lambda: self.table.export(self.app.con, "差異待辦")).pack(side="left")
         self.table = W.Table(self, [("kind", "類型", 110), ("drug_code", "代碼", 110), ("group_code", "分組", 120),
                                     ("rec", "認定", 220), ("detail", "說明", 360), ("status", "狀態", 70),

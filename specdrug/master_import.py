@@ -34,7 +34,7 @@ MASTER_FIELDS = {
     "spec_qty": "規格數值",
     "spec_unit": "規格單位",
     "price": "支付價",
-    "annotation_raw": "主檔註記原值（必要／特殊藥品）",
+    "annotation_raw": "必要藥品註記（DRUG_NECESSARY）",
     "license_no": "許可證號",
 }
 CODE_FIELDS = {"group_code", "atc_code", "dose_code", "firm_code"}

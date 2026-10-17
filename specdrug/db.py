@@ -355,7 +355,8 @@ BEGIN SELECT RAISE(ABORT, '稽核紀錄只追加，不可刪除'); END;
 """
 
 DEFAULT_SETTINGS = {
-    # 【設計建議】主檔「必要藥品」(DRUG_NECESSARY)代碼與認定類別對照；依DWM_DRUG_RCODE type L名稱預設，可修改。
+    # 【設計建議】認定類別與主檔必要藥品註記（DRUG_NECESSARY，非特殊品項註記DRUG_SPEC_MARK）代碼對照；
+    # 依DWM_DRUG_RCODE type L名稱預設，可修改。
     "annotation_code_map": '{"不可替代特殊藥品": "3", "特殊藥品": "4"}',
     # 只做經確認的單位換算；預設僅同名單位（大小寫、括號說明去除後比較）。
     "unit_conversions": "{}",
