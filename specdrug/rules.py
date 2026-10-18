@@ -204,8 +204,13 @@ class Evaluator:
             factor = self.conv.get((unit, want_unit))
             if factor is None:
                 if unit in self.known_units and want_unit in self.known_units:
-                    # 兩者皆已知、無經確認換算：視為不同規格
-                    return FALSE, f"規格單位{unit}≠{want_unit}"
+                    # 兩者皆已知、無經確認換算：等於→不符合、不等於→符合，大小比較無從判斷→待確認
+                    op = node["op"]
+                    if op == "eq":
+                        return FALSE, f"規格單位{unit}≠{want_unit}"
+                    if op == "ne":
+                        return TRUE, f"規格單位{unit}≠{want_unit}"
+                    return UNKNOWN, f"規格單位{unit}與{want_unit}無確認換算，無法比較大小"
                 return UNKNOWN, f"規格單位{unit}未知或無確認換算"
             qty = qty * factor
         op = node["op"]
