@@ -337,3 +337,23 @@ def test_schema_upgrade_keeps_attachment_links(tmp_path):
     ro = sqlite3.connect(p)
     assert ro.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     ro.close()
+
+
+# ---------------- 次要：鎖有效性與指標切換重試 ----------------
+
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="以POSIX flock模擬伺服端釋放鎖")
+def test_editlock_valid_detects_lost_lock(tmp_path):
+    import fcntl
+    from specdrug.store import EditLock
+    p = tmp_path / "edit.lock"
+    p.touch()
+    lock = EditLock(p)
+    lock.acquire()
+    assert lock.valid()
+    fcntl.flock(lock.fh.fileno(), fcntl.LOCK_UN)  # 模擬伺服端已釋放（如斷線後復原）
+    assert not lock.valid()
+    other = EditLock(p)
+    other.acquire()  # 失效判定未佔住鎖
+    other.release()
+    lock.release()
+

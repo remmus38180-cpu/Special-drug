@@ -92,7 +92,8 @@ class EditLock:
         self.ident = (st.st_dev, st.st_ino)
 
     def valid(self) -> bool:
-        """鎖有效性：控制代碼仍開啟、鎖檔仍是同一物件、共用槽可存取。不明即視為無效。"""
+        """鎖有效性：控制代碼仍開啟、鎖檔仍是同一物件、共用槽可存取，且另開控制代碼試鎖取不到。
+        試得到即表示原鎖已被伺服端釋放（如斷線），判定失效。不明即視為無效。"""
         if self.fh is None or self.fh.closed:
             return False
         try:
@@ -100,9 +101,32 @@ class EditLock:
             st2 = os.stat(self.path)
             if (st.st_ino and st2.st_ino) and (st.st_dev, st.st_ino) != (st2.st_dev, st2.st_ino):
                 return False
+        except OSError:
+            return False
+        return not self._probe_acquirable()
+
+    def _probe_acquirable(self) -> bool:
+        """另開控制代碼以非阻塞方式試鎖；取得後立即釋放。無法開檔視為可疑（回傳True→失效）。"""
+        try:
+            fh = open(self.path, "a+b")
+        except OSError:
+            return True
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             return True
         except OSError:
             return False
+        finally:
+            fh.close()
 
     def release(self):
         if self.fh and not self.fh.closed:
