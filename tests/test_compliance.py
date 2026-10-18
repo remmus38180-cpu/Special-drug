@@ -72,3 +72,31 @@ def test_admin_only_backup_restore_envcheck(tmp_path):
     rid2 = s.restore(ws.lock, bk, ctx=ws.ctx(), reason="演練", op_id="r-admin")
     assert s.current()["release_id"] == rid2
     ws.close()
+
+
+# ---------------- §13、§6.1 還原保留還原前完整稽核歷程 ----------------
+
+def test_restore_merges_current_audit_history(tmp_path):
+    import sqlite3
+    from specdrug import cases as C
+    s, ws = _shared(tmp_path)
+    ws.start_edit()
+    C.create_case(ws.ctx(), subject="備份前")
+    rid1 = ws.publish()
+    bk = s.backup(rid1, ctx=ws.ctx())
+    C.create_case(ws.ctx(), subject="備份後")
+    rid2 = ws.publish()
+    con2 = sqlite3.connect(s.releases / rid2 / "data.sqlite")
+    before = {r[0] for r in con2.execute("SELECT id FROM audit_event")}
+    con2.close()
+    rid3 = s.restore(ws.lock, bk, ctx=ws.ctx(), reason="演練", op_id="r-1")
+    con3 = sqlite3.connect(s.releases / rid3 / "data.sqlite")
+    ids = [r[0] for r in con3.execute("SELECT id FROM audit_event")]
+    subjects = [r[0] for r in con3.execute("SELECT subject FROM case_record")]
+    after_case = con3.execute("SELECT COUNT(*) FROM audit_event WHERE entity='case_record' AND action='新增'"
+                              " AND diff_json LIKE '%備份後%'").fetchone()[0]
+    con3.close()
+    assert subjects == ["備份前"]  # 業務資料回到備份
+    assert before <= set(ids) and len(ids) == len(set(ids))  # 稽核只追加、不重複
+    assert after_case == 1
+    ws.close()

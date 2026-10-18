@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import __version__
 from .core import ROLE_ADMIN, Ctx, audit
-from .db import SCHEMA_VERSION, open_db
+from .db import SCHEMA_VERSION, Tx, open_db
 from .util import new_id, sha256_file, utc_now
 
 DIRS = ("app", "control", "releases", "attachments", "staging", "backups")
@@ -385,13 +385,29 @@ class SharedStore:
             shutil.copyfile(backup_dir / "data.sqlite", db)
             con = open_db(db)
             rctx = Ctx(con, operator, set(ctx.roles), True, request_id=op_id)
+            merged = self._merge_audit(con, cur["release_id"]) if cur else 0
             src = json.loads((backup_dir / "backup_manifest.json").read_text(encoding="utf-8"))
-            audit(rctx, "release", src["release_id"], "還原", reason=f"{reason}（自備份 {backup_dir.name}）")
+            audit(rctx, "release", src["release_id"], "還原", reason=f"{reason}（自備份 {backup_dir.name}；併入現行版本稽核 {merged} 筆）")
             con.close()
             return self.publish(lock, db, base_release_id=cur["release_id"] if cur else None, op_id=op_id,
                                 operator=operator, pending_attach_dir=backup_dir / "attachments")
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+
+    def _merge_audit(self, con, current_rid) -> int:
+        """把現行版本的稽核紀錄追加到還原資料庫（同id不重複），保留還原前完整歷程。"""
+        self.verify_release(current_rid)
+        cols = "id, at, actor, entity, entity_id, action, diff_json, reason, request_id"
+        src = sqlite3.connect(f"file:{self.releases / current_rid / 'data.sqlite'}?mode=ro", uri=True)
+        try:
+            rows = src.execute(f"SELECT {cols} FROM audit_event ORDER BY at").fetchall()
+        finally:
+            src.close()
+        with Tx(con):
+            n = con.total_changes
+            con.executemany(f"INSERT OR IGNORE INTO audit_event({cols}) VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            return con.total_changes - n
 
 
 def verify_backup(dest: Path) -> list[str]:
