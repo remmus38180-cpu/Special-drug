@@ -358,6 +358,7 @@ class MigrationTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x")
         for t, cmd in (("讀入Excel（final工作表）", self.stage), ("合併候選", self.candidates),
+                       ("會議合併候選", self.meeting_candidates),
                        ("確認寫入選取列", self.commit), ("略過", self.skip)):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=2)
         self.only = tk.StringVar(value="待核對")
@@ -421,6 +422,23 @@ class MigrationTab(ttk.Frame):
         c = MG.merge_candidates(self.app.con, sha)
         W.TextView(self, "合併候選（不自動合併；確認範圍相同時，寫入時選既有認定）",
                    "\n".join(f"{x['key']}＝{x['value']}：列 {x['rows']}" for x in c) or "無")
+
+    def meeting_candidates(self):
+        """同原文會議不自動合併；使用者逐組確認後才合併。"""
+        from .. import cases as C
+        cands = MG.meeting_merge_candidates(self.app.con)
+        if not cands:
+            W.info(self, "無會議合併候選。")
+            return
+        labels = {f"{c['meeting_type']}｜{c['name']}｜{c['meeting_date'] or '日期待確認'}｜{len(c['meeting_ids'])}筆"
+                  f"（案件 {'、'.join(c['cases'][:5])}{'…' if len(c['cases']) > 5 else ''}）": c for c in cands}
+        v = W.form(self, "會議合併候選（確認為同一次會議才合併）",
+                   [("group", "候選組", "choice", list(labels)), ("reason", "合併理由／核對依據*", "long")])
+        if v and v["group"]:
+            c = labels[v["group"]]
+            n = self.app.run(C.merge_meetings, self.app.ctx(), c["meeting_ids"][0], c["meeting_ids"][1:], v["reason"])
+            if n is not None:
+                W.info(self, f"已合併，移動議案 {n} 筆；被併會議保留並註明。")
 
     def commit(self):
         sel = [r for r in self.table.selected() if r["status"] == "待核對"]

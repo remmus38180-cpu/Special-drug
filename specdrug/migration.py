@@ -13,7 +13,7 @@ import re
 from collections import defaultdict
 
 from . import rules
-from .cases import create_case, create_meeting, find_meeting, add_agenda, add_decision
+from .cases import create_case, create_meeting, add_agenda, add_decision
 from .core import BizError, Ctx, ROLE_CLERK, ROLE_REVIEWER, audit, get
 from .recognition import create_recognition, create_revision
 from .util import new_id, parse_date, sha256_file, utc_now
@@ -205,6 +205,22 @@ def merge_candidates(con, sha) -> list[dict]:
             if len(set(rows)) > 1]
 
 
+def meeting_merge_candidates(con) -> list[dict]:
+    """類型、原文名稱及日期相同且仍有議案的會議，僅列合併候選；由使用者確認後以 cases.merge_meetings 合併。"""
+    groups = defaultdict(list)
+    for r in con.execute("SELECT m.id, m.meeting_type, m.name, m.meeting_date FROM meeting m"
+                         " WHERE EXISTS (SELECT 1 FROM meeting_agenda a WHERE a.meeting_id=m.id) ORDER BY m.created_at"):
+        groups[(r["meeting_type"], r["name"], r["meeting_date"])].append(r["id"])
+    out = []
+    for (typ, name, date), ids in groups.items():
+        if len(ids) > 1:
+            cases = [r[0] for r in con.execute(
+                f"SELECT DISTINCT c.case_no FROM meeting_agenda a JOIN case_record c ON c.id=a.case_id"
+                f" WHERE a.meeting_id IN ({','.join('?' * len(ids))}) ORDER BY c.case_no", ids)]
+            out.append({"meeting_type": typ, "name": name, "meeting_date": date, "meeting_ids": ids, "cases": cases})
+    return out
+
+
 def list_rows(con, sha=None, status=None):
     sql = "SELECT * FROM migration_row WHERE 1=1"
     args = []
@@ -255,7 +271,8 @@ def commit_row(ctx: Ctx, row_id, *, merge_into_recognition_id=None, rule_overrid
             pending_fields="recv_date,recv_doc_no,applicant", source_ref=src, notes="\n\n".join(notes))
         result["case_id"] = case_id
         for i, m in enumerate(p.get("meetings", []), start=1):
-            mid = find_meeting(ctx.con, m["type"], m["name"], m["date"]) or create_meeting(
+            # 不以會議原文自動合併為同一會議；相同原文者列為合併候選，由使用者確認（meeting_merge_candidates）
+            mid = create_meeting(
                 ctx, meeting_type=m["type"], name=m["name"], meeting_date=m["date"],
                 notes="歷史移轉建立；日期僅有年月者留空待確認" if not m["date"] else "歷史移轉建立")
             ag = add_agenda(ctx, meeting_id=mid, case_id=case_id, agenda_no=None,

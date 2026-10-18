@@ -107,6 +107,34 @@ def find_meeting(con, meeting_type, name, meeting_date=None):
     return row[0] if row else None
 
 
+def merge_meetings(ctx: Ctx, keep_id, merge_ids, reason) -> int:
+    """使用者確認為同一次會議後合併：議案及附件改連保留會議；被併會議保留紀錄並註明，不硬刪。"""
+    ctx.require(*EDIT_ROLES)
+    if not reason:
+        raise BizError("合併會議須填寫理由（核對依據）。")
+    keep = get(ctx, "meeting", keep_id)
+    if not keep:
+        raise BizError("找不到保留的會議。")
+    moved = 0
+    with ctx.tx():
+        for mid in merge_ids:
+            m = get(ctx, "meeting", mid)
+            if not m or mid == keep_id:
+                raise BizError("合併對象不正確。")
+            if m["meeting_type"] != keep["meeting_type"]:
+                raise BizError("會議類型不同，不能合併。")
+            agendas = [r[0] for r in ctx.con.execute("SELECT id FROM meeting_agenda WHERE meeting_id=?", (mid,))]
+            for aid in agendas:
+                update(ctx, "meeting_agenda", aid, {"meeting_id": keep_id}, reason=reason)
+            ctx.con.execute("INSERT OR IGNORE INTO attachment_link(attachment_id, entity, entity_id)"
+                            " SELECT attachment_id, entity, ? FROM attachment_link WHERE entity='meeting' AND entity_id=?",
+                            (keep_id, mid))
+            update(ctx, "meeting", mid, {"notes": f"{m['notes'] or ''}\n【已併入會議 {keep['name']}（{keep_id}）】"
+                                                  f"理由：{reason}".strip()}, reason=reason)
+            moved += len(agendas)
+    return moved
+
+
 def add_agenda(ctx: Ctx, *, meeting_id, case_id, agenda_no=None, subject=None, proposal=None, discussion=None,
                original_text=None) -> str:
     """同案重提新增議案紀錄，不覆蓋前次。以明確關聯連結案件。"""

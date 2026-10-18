@@ -262,3 +262,24 @@ def test_migration_expert_meeting_is_expert_advice(ctx, tmp_path):
     tl = C.case_timeline(ctx.con, res["case_id"])
     assert [(a["meeting_type"], a["decisions"][0]["nature"]) for a in tl] == [("專家", "專家建議"),
                                                                               ("共同擬訂", "會議決議")]
+
+
+def test_migration_meetings_not_auto_merged(ctx, tmp_path):
+    from specdrug import cases as C
+    from specdrug import migration as MG
+    p = _workbook(tmp_path, [dict(seq="1", group_code="G1", category="特殊藥品", rule="分組代碼=G1",
+                                  history="擬訂會議113年8月"),
+                             dict(seq="2", group_code="G2", category="特殊藥品", rule="分組代碼=G2",
+                                  history="擬訂會議113年8月")])
+    MG.stage_workbook(ctx, p)
+    res = [MG.commit_row(ctx, r["id"]) for r in MG.list_rows(ctx.con)]
+    mids = [C.case_timeline(ctx.con, r["case_id"])[0]["meeting_id"] for r in res]
+    assert mids[0] != mids[1]  # 不以原文自動合併
+    cands = MG.meeting_merge_candidates(ctx.con)
+    assert len(cands) == 1 and set(cands[0]["meeting_ids"]) == set(mids)
+    with pytest.raises(BizError, match="理由"):
+        C.merge_meetings(ctx, mids[0], [mids[1]], "")
+    C.merge_meetings(ctx, mids[0], [mids[1]], "人工核對為同一次會議")
+    assert [C.case_timeline(ctx.con, r["case_id"])[0]["meeting_id"] for r in res] == [mids[0], mids[0]]
+    assert MG.meeting_merge_candidates(ctx.con) == []
+    assert ctx.con.execute("SELECT COUNT(*) FROM meeting WHERE id=?", (mids[1],)).fetchone()[0] == 1  # 不硬刪
