@@ -283,3 +283,14 @@ def test_migration_meetings_not_auto_merged(ctx, tmp_path):
     assert [C.case_timeline(ctx.con, r["case_id"])[0]["meeting_id"] for r in res] == [mids[0], mids[0]]
     assert MG.meeting_merge_candidates(ctx.con) == []
     assert ctx.con.execute("SELECT COUNT(*) FROM meeting WHERE id=?", (mids[1],)).fetchone()[0] == 1  # 不硬刪
+
+
+# ---------------- 次要：主檔啟用須資料基準日、來源檔存附件 ----------------
+
+def test_master_activation_requires_base_date(ctx, tmp_path):
+    from conftest import BASE_ROWS, write_master
+    from specdrug import master_import as M
+    iid = M.stage_import(ctx, write_master(tmp_path / "nb.csv", BASE_ROWS), MAPPING)
+    with pytest.raises(BizError, match="資料基準日"):
+        M.activate(ctx, iid)
+    assert M.active_import_id(ctx.con) is None

@@ -280,8 +280,9 @@ class MasterTab(ttk.Frame):
             merge = W.ask(self, f"有 {c['identical_duplicate_count']} 個完全相同重複代碼，確認合併後啟用？")
             if not merge:
                 return
-        if self.app.run(M.activate, self.app.ctx(), r["id"], confirm_merge_duplicates=merge, ok="已啟用為目前主檔。"):
-            pass
+        if self.app.run(M.activate, self.app.ctx(), r["id"], confirm_merge_duplicates=merge,
+                        ok="已啟用為目前主檔。") is None and M.active_import_id(self.app.con) != r["id"]:
+            return
         if W.ask(self, "是否產生既有認定的差異待辦（新符合／不再符合／分組異動）？"):
             n = self.app.run(P.generate_diff_todos, self.app.ctx(), r["id"])
             if n is not None:

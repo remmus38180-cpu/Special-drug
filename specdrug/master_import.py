@@ -355,6 +355,8 @@ def activate(ctx: Ctx, import_id: str, confirm_merge_duplicates=False) -> None:
         raise BizError("找不到主檔匯入版本。")
     if imp["status"] != "試匯入":
         raise BizError(f"此版本狀態為「{imp['status']}」，不能再啟用。")
+    if not imp["base_date"]:
+        raise BizError("主檔啟用須有資料基準日；請重新試匯入並填寫資料基準日。")
     chk = json.loads(imp["check_json"])
     if chk["conflict_count"]:
         rows = "；".join(f"{c['code']}（列 {','.join(map(str, c['rows']))}：{','.join(c['diffs'])}）"
