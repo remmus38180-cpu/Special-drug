@@ -13,7 +13,8 @@ from .db import get_setting
 from .master_import import mapped_fields
 from .util import new_id, parse_date, today, utc_now
 
-CATEGORIES = ("不可替代特殊藥品", "特殊藥品", "不可替代必要藥品", "必要藥品", "取消認定", "其他", "待確認")
+# 規格B16：歷史名稱「不可替代必要藥品」「必要藥品」不作為認定類別，僅保留於原始名稱並經移轉對照轉為標準類別。
+CATEGORIES = ("不可替代特殊藥品", "特殊藥品", "取消認定", "其他", "待確認")
 EDIT_ROLES = (ROLE_CLERK, ROLE_REVIEWER)
 
 
@@ -84,6 +85,8 @@ def update_revision(ctx: Ctx, revision_id, changes: dict, expected_version=None)
     if rev["confirm_status"] not in ("草稿", "待確認"):
         raise BizError("已確認或撤銷的版本不可修改；請建立更正版本。")
     changes = dict(changes)
+    if "category" in changes and changes["category"] not in CATEGORIES:
+        raise BizError("認定類別不正確。")
     if "rule" in changes:
         r = changes.pop("rule")
         if r is not None:

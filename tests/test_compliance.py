@@ -219,3 +219,18 @@ def test_attachment_targets_for_decision_agenda_revision_price(ctx, master, tmp_
     for e, i in (("decision", dec), ("meeting_agenda", ag), ("recognition_revision", rev), ("price_action", pa)):
         add_attachment(ctx, f, e, i, tmp_path / "pending")
         assert len(attachments_of(ctx.con, e, i)) == 1
+
+
+# ---------------- B16 歷史類別名稱不作為認定類別；移轉對照保留 ----------------
+
+def test_historical_category_names_removed(ctx):
+    from specdrug import migration as MG
+    assert "不可替代必要藥品" not in R.CATEGORIES and "必要藥品" not in R.CATEGORIES
+    rec = R.create_recognition(ctx, name="類別")
+    for cat in ("不可替代必要藥品", "必要藥品"):
+        with pytest.raises(BizError, match="類別"):
+            R.create_revision(ctx, rec, category=cat)
+    assert MG.HIST_TO_STD["不可替代必要藥品"] == "不可替代特殊藥品" and MG.HIST_TO_STD["必要藥品"] == "特殊藥品"
+    rev = R.create_revision(ctx, rec, category="特殊藥品")
+    with pytest.raises(BizError, match="類別"):
+        R.update_revision(ctx, rev, {"category": "必要藥品"})
