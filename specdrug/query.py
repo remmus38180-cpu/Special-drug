@@ -28,9 +28,12 @@ def drug_detail(con, drug_code, day=None) -> dict:
             " JOIN case_record c ON c.id=cd.case_id WHERE cd.drug_code=?", (drug_code,)):
         ev(r["meeting_date"], f"{r['meeting_type']}會議／{r['nature']}",
            f"{r['case_no']} {r['name']}：{r['result']}{('（' + r['conditions'] + '）') if r['conditions'] else ''}")
-    for s in drug_recognitions(con, drug_code, day):
-        ev(s["effective_from"], "認定", f"{s['recognition_no']} {s['name']}：{s['category']}（{s['state']}）",
-           s["revision_id"])
+    recs = drug_recognitions(con, drug_code, day)
+    for s in recs:
+        ev(s["effective_from"], "認定",
+           f"{s['recognition_no']} {s['name']} 第{s['revision_no']}版：{s['category']}（{s['state']}；期間 "
+           f"{s['effective_from'] or '起日待確認'}～{s['period_end'] or '無已知終止日'}）"
+           f"{'' if s['current'] else '［歷史版本］'}", s["revision_id"], s["state"])
     for r in con.execute(
             "SELECT pa.*, r.name FROM price_action pa JOIN recognition_revision rv ON rv.id=pa.revision_id"
             " JOIN recognition r ON r.id=rv.recognition_id WHERE pa.drug_code=? ORDER BY pa.effective_date",
@@ -50,6 +53,7 @@ def drug_detail(con, drug_code, day=None) -> dict:
     return {
         "drug_code": drug_code, "day": day, "master": masters,
         "category": drug_category_on(con, drug_code, day),
+        "recognitions": recs,
         "annotation": annotation_on(con, drug_code, day),
         "events": events,
     }

@@ -100,3 +100,37 @@ def test_restore_merges_current_audit_history(tmp_path):
     assert before <= set(ids) and len(ids) == len(set(ids))  # 稽核只追加、不重複
     assert after_case == 1
     ws.close()
+
+
+# ---------------- T21 品項時間序列列出曾涵蓋之全部認定版本 ----------------
+
+def _confirmed_rev(ctx, rec, imp, rule, category, eff_from, eff_to=None):
+    rev = R.create_revision(ctx, rec, category=category, rule=rule, effective_from=eff_from, effective_to=eff_to,
+                            completeness="完整")
+    if rule is not None:
+        R.confirm_snapshot(ctx, R.save_snapshot(ctx, rev, imp))
+    R.confirm_revision(ctx, rev)
+    return rev
+
+
+def test_drug_timeline_lists_all_revisions(ctx, master):
+    from specdrug.query import drug_detail
+    rec = R.create_recognition(ctx, name="甲")
+    v1 = _confirmed_rev(ctx, rec, master, B4, "特殊藥品", "2020-01-01")
+    v2 = _confirmed_rev(ctx, rec, master, None, "取消認定", "2022-01-01")
+    v3 = _confirmed_rev(ctx, rec, master, B4, "不可替代特殊藥品", "2024-01-01")
+    rec2 = R.create_recognition(ctx, name="乙")
+    w1 = _confirmed_rev(ctx, rec2, master, B4, "特殊藥品", "2018-01-01", "2019-01-01")
+    srcs = {s["revision_id"]: s for s in R.drug_recognitions(ctx.con, "B000004100", "2025-06-01")}
+    assert set(srcs) == {v1, v2, v3, w1}
+    assert srcs[v1]["state"] == "已取消" and srcs[v1]["period_end"] == "2022-01-01"
+    assert srcs[v2]["state"] == "已失效" and srcs[v2]["period_end"] == "2024-01-01"
+    assert srcs[v3]["state"] == "有效" and srcs[v3]["current"]
+    assert srcs[w1]["state"] == "已失效" and srcs[w1]["period_end"] == "2019-01-01"
+    # 單一類別計算不受歷史版本影響
+    assert R.drug_category_on(ctx.con, "B000004100", "2025-06-01")["category"] == "不可替代特殊藥品"
+    d = drug_detail(ctx.con, "B000004100", "2025-06-01")
+    rec_events = [e for e in d["events"] if e["kind"] == "認定"]
+    assert len(rec_events) == 4
+    assert {e["status"] for e in rec_events} == {"已取消", "已失效", "有效"}
+    assert any("2020-01-01～2022-01-01" in e["text"] for e in rec_events)

@@ -379,8 +379,50 @@ def status_on(con, recognition_id, day=None) -> dict:
     return {"state": "已失效", "revision": revs[-1]}
 
 
+def revision_history(con, recognition_id, day=None) -> list[dict]:
+    """認定項目全部已確認版本：期間（起日含、迄日不含；迄日為版本迄日或下一版本起日較早者）及指定日期狀態。
+
+    含已取消、已失效、已被更正取代者；不覆寫任何歷程。
+    """
+    day = day or today()
+    revs = [dict(r) for r in con.execute(
+        "SELECT * FROM recognition_revision WHERE recognition_id=? AND confirm_status='已確認' ORDER BY revision_no",
+        (recognition_id,))]
+    replaced = {r["supersedes_id"] for r in revs if r["supersedes_id"]}
+    timeline = sorted((r for r in revs if r["id"] not in replaced and r["effective_from"]),
+                      key=lambda r: (r["effective_from"], r["revision_no"]))
+    st = status_on(con, recognition_id, day)
+    cur_id = st["revision"]["id"] if st["revision"] else None
+    out = []
+    for r in revs:
+        nxt = None
+        if r["effective_from"] and r["id"] not in replaced:
+            nxt = next((t for t in timeline if t["effective_from"] > r["effective_from"]), None)
+        end = r["effective_to"]
+        if nxt and (not end or nxt["effective_from"] < end):
+            end = nxt["effective_from"]
+        if r["id"] in replaced:
+            state = "已更正取代"
+        elif r["id"] == cur_id:
+            state = st["state"]
+        elif not r["effective_from"]:
+            state = "生效日待確認"
+        elif r["effective_from"] > day:
+            state = "待生效"
+        elif nxt and end == nxt["effective_from"] and nxt["effective_from"] <= day and nxt["category"] == "取消認定":
+            state = "已取消"
+        else:
+            state = "已失效"
+        out.append(dict(r, state=state, period_end=end, current=r["id"] == cur_id))
+    return out
+
+
 def drug_recognitions(con, drug_code, day=None) -> list[dict]:
-    """列出涵蓋該藥的全部認定來源（已確認快照）。"""
+    """該藥曾被涵蓋的全部認定版本（含已取消、已失效），標示各版本狀態與期間。
+
+    covers：此版本範圍（與目前規則一致之已確認快照）含該藥；取消認定版本一併列出。
+    current：該認定項目於指定日期所採的版本。
+    """
     day = day or today()
     out = []
     rows = con.execute(
@@ -388,19 +430,25 @@ def drug_recognitions(con, drug_code, day=None) -> list[dict]:
         " JOIN recognition_revision rv ON rv.id=ss.revision_id WHERE sm.drug_code=? AND ss.status='已確認'",
         (drug_code,)).fetchall()
     for (rec_id,) in rows:
-        st = status_on(con, rec_id, day)
-        rev = st["revision"]
-        if rev and drug_code in revision_scope(con, rev["id"]):
-            rec = get(con, "recognition", rec_id)
+        hist = revision_history(con, rec_id, day)
+        covers = {h["id"]: drug_code in revision_scope(con, h["id"]) for h in hist}
+        if not any(covers.values()):
+            continue
+        rec = get(con, "recognition", rec_id)
+        for h in hist:
+            if not covers[h["id"]] and h["category"] != "取消認定":
+                continue
             out.append({"recognition_id": rec_id, "recognition_no": rec["recognition_no"], "name": rec["name"],
-                        "state": st["state"], "category": rev["category"], "revision_id": rev["id"],
-                        "effective_from": rev["effective_from"], "effective_to": rev["effective_to"]})
+                        "state": h["state"], "category": h["category"], "revision_id": h["id"],
+                        "revision_no": h["revision_no"], "effective_from": h["effective_from"],
+                        "effective_to": h["effective_to"], "period_end": h["period_end"],
+                        "current": h["current"], "covers": covers[h["id"]]})
     return out
 
 
 def drug_category_on(con, drug_code, day=None) -> dict:
     """單一類別；多來源類別衝突時不產生單一結果，不採最後儲存者優先。"""
-    srcs = [s for s in drug_recognitions(con, drug_code, day) if s["state"] == "有效"]
+    srcs = [s for s in drug_recognitions(con, drug_code, day) if s["current"] and s["covers"] and s["state"] == "有效"]
     cats = {s["category"] for s in srcs}
     if len(cats) > 1:
         return {"category": None, "conflict": True, "sources": srcs}
