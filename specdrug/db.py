@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2：附件可連結主檔匯入及移轉批次（來源檔）
 
 COMMON = """
     created_by TEXT, created_at TEXT, updated_by TEXT, updated_at TEXT,
@@ -289,7 +289,8 @@ CREATE TABLE IF NOT EXISTS attachment (
 
 CREATE TABLE IF NOT EXISTS attachment_link (
     attachment_id TEXT NOT NULL REFERENCES attachment(id),
-    entity TEXT NOT NULL CHECK (entity IN ('case_record','meeting','meeting_agenda','decision','contract','recognition_revision','price_action')),
+    entity TEXT NOT NULL CHECK (entity IN ('case_record','meeting','meeting_agenda','decision','contract','recognition_revision','price_action',
+                     'master_import','migration_batch')),
     entity_id TEXT NOT NULL,
     PRIMARY KEY (attachment_id, entity, entity_id)
 );
@@ -383,9 +384,28 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
 
 def init_db(con: sqlite3.Connection) -> None:
     con.executescript(SCHEMA)
+    ver = schema_version(con)
+    if 0 < ver < 2:
+        _upgrade_to_2(con)
     con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     for k, v in DEFAULT_SETTINGS.items():
         con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+
+
+def _upgrade_to_2(con: sqlite3.Connection) -> None:
+    """attachment_link 允許連結 master_import／migration_batch；保留既有關聯。"""
+    with Tx(con):
+        con.execute("ALTER TABLE attachment_link RENAME TO attachment_link_v1")
+        con.execute("""CREATE TABLE attachment_link (
+    attachment_id TEXT NOT NULL REFERENCES attachment(id),
+    entity TEXT NOT NULL CHECK (entity IN ('case_record','meeting','meeting_agenda','decision','contract','recognition_revision','price_action',
+                     'master_import','migration_batch')),
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (attachment_id, entity, entity_id)
+)""")
+        con.execute("INSERT INTO attachment_link SELECT attachment_id, entity, entity_id FROM attachment_link_v1")
+        con.execute("DROP TABLE attachment_link_v1")
+        con.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
 
 
 def schema_version(con: sqlite3.Connection) -> int:

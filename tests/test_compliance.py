@@ -294,3 +294,46 @@ def test_master_activation_requires_base_date(ctx, tmp_path):
     with pytest.raises(BizError, match="資料基準日"):
         M.activate(ctx, iid)
     assert M.active_import_id(ctx.con) is None
+
+
+def test_import_sources_saved_as_attachments(ctx, tmp_path):
+    from conftest import BASE_ROWS, write_master
+    from specdrug import master_import as M
+    from specdrug import migration as MG
+    from specdrug.attachments import attachments_of
+    from specdrug.util import sha256_file
+    pend = tmp_path / "pending"
+    src = write_master(tmp_path / "src.csv", BASE_ROWS)
+    iid = M.stage_import(ctx, src, MAPPING, base_date="2026-10-01", pending_dir=pend)
+    atts = attachments_of(ctx.con, "master_import", iid)
+    assert [a["sha256"] for a in atts] == [sha256_file(src)]
+    assert (pend / atts[0]["storage_key"]).exists()
+    wb = _workbook(tmp_path, [dict(seq="1", group_code="G1", category="特殊藥品", rule="分組代碼=G1")])
+    r = MG.stage_workbook(ctx, wb, pending_dir=pend)
+    assert [a["sha256"] for a in attachments_of(ctx.con, "migration_batch", r["batch_id"])] == [sha256_file(wb)]
+
+
+def test_schema_upgrade_keeps_attachment_links(tmp_path):
+    import sqlite3
+    from specdrug.db import SCHEMA_VERSION, open_db, schema_version
+    p = tmp_path / "old.sqlite"
+    con = open_db(p)
+    con.execute("INSERT INTO attachment(id, orig_name, storage_key, sha256, size) VALUES ('a','f','k','s',1)")
+    con.execute("INSERT INTO attachment_link VALUES ('a','case_record','c1')")
+    # 模擬第1版資料結構
+    con.executescript("""
+        CREATE TABLE t AS SELECT * FROM attachment_link; DROP TABLE attachment_link;
+        CREATE TABLE attachment_link (attachment_id TEXT NOT NULL REFERENCES attachment(id), entity TEXT NOT NULL
+          CHECK (entity IN ('case_record','meeting','meeting_agenda','decision','contract','recognition_revision','price_action')),
+          entity_id TEXT NOT NULL, PRIMARY KEY (attachment_id, entity, entity_id));
+        INSERT INTO attachment_link SELECT * FROM t; DROP TABLE t;
+        UPDATE meta SET value='1' WHERE key='schema_version';""")
+    con.close()
+    con = open_db(p)
+    assert schema_version(con) == SCHEMA_VERSION >= 2
+    assert con.execute("SELECT entity_id FROM attachment_link").fetchone()[0] == "c1"
+    con.execute("INSERT INTO attachment_link VALUES ('a','master_import','i1')")
+    con.close()
+    ro = sqlite3.connect(p)
+    assert ro.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    ro.close()

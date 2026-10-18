@@ -208,8 +208,11 @@ def load_price_long(path, base_date: str, code_col="DRUG_CODE", s_col="PAY_S_DAT
 # ---------------- 試匯入 ----------------
 
 def stage_import(ctx: Ctx, path, mapping: dict, sheet=None, header_row=1, base_date=None,
-                 lookups: dict | None = None, rcode_path=None, price_path=None, note=None) -> str:
-    """試匯入：寫入暫存版本（狀態=試匯入），回傳import_id；不改目前主檔版本。"""
+                 lookups: dict | None = None, rcode_path=None, price_path=None, note=None, pending_dir=None) -> str:
+    """試匯入：寫入暫存版本（狀態=試匯入），回傳import_id；不改目前主檔版本。
+
+    pending_dir：來源檔（含代碼檔、價格長表）以雜湊鍵保存為附件的本機待上傳區；未給時不保存並於檢核結果提示。
+    """
     ctx.require(ROLE_ADMIN, ROLE_REVIEWER, ROLE_CLERK)
     if "drug_code" not in mapping or not mapping["drug_code"]:
         raise BizError("必須映射「藥品代碼」欄位。")
@@ -300,6 +303,8 @@ def stage_import(ctx: Ctx, path, mapping: dict, sheet=None, header_row=1, base_d
     if last_no >= EXCEL_MAX_ROW or price_trunc:
         warnings.insert(0, "來源資料達Excel列數上限（1,048,576列），可能已被截斷，請改用完整CSV匯出。")
 
+    if not pending_dir:
+        warnings.insert(0, "來源檔未保存為附件（未提供待上傳區）。")
     unmapped = [MASTER_FIELDS[t] for t in MASTER_FIELDS if t not in mapping and t not in lookups
                 and not (t == "price" and price_path)]
     check = {
@@ -312,6 +317,7 @@ def stage_import(ctx: Ctx, path, mapping: dict, sheet=None, header_row=1, base_d
         "warnings": warnings[:200], "warning_count": len(warnings),
         "base_date": base_date,
         "price_source": os.path.basename(str(price_path)) if price_path else None,
+        "source_saved": bool(pending_dir),
     }
     conflict_codes = {c["code"] for c in conflicts}
     with ctx.tx():
@@ -334,6 +340,11 @@ def stage_import(ctx: Ctx, path, mapping: dict, sheet=None, header_row=1, base_d
                           *[rec.get(t) for t in MASTER_FIELDS if t != "drug_code"],
                           rec["source_row"], json.dumps(extra) if extra else None])
         ctx.con.executemany(sql, batch)
+        if pending_dir:
+            from .attachments import save_source
+            for f in (path, rcode_path, price_path):
+                if f:
+                    save_source(ctx, f, "master_import", import_id, pending_dir)
         audit(ctx, "master_import", import_id, "試匯入",
               after={"source": os.path.basename(str(path)), "sha256": sha, "codes": len(records),
                      "conflicts": len(conflicts)})

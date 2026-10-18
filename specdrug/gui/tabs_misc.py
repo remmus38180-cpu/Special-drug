@@ -179,7 +179,7 @@ class MasterTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x")
         for t, cmd in (("試匯入新主檔", self.wizard), ("檢視檢核", self.view_check), ("啟用", self.activate),
-                       ("放棄試匯入", self.discard), ("與目前版本比較", self.diff)):
+                       ("放棄試匯入", self.discard), ("與目前版本比較", self.diff), ("來源檔", self.source)):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=2)
         self.cur = ttk.Label(top, text="")
         self.cur.pack(side="left", padx=10)
@@ -241,7 +241,8 @@ class MasterTab(ttk.Frame):
                        and (k in mapping or lk.get("from") in mapping)}
             return M.stage_import(self.app.ctx(), path, mapping, sheet=sheet, header_row=hr,
                                   base_date=vals["base_date"], lookups=lookups, rcode_path=vals["rcode"] or None,
-                                  price_path=vals["price"] or None, note=vals["note"])
+                                  price_path=vals["price"] or None, note=vals["note"],
+                                  pending_dir=self.app.ws.pending_dir)
         self.config(cursor="watch")
         self.update()
         try:
@@ -288,6 +289,11 @@ class MasterTab(ttk.Frame):
             if n is not None:
                 W.info(self, f"新增差異待辦 {n} 筆。")
         self.refresh()
+
+    def source(self):
+        r = self.table.one(self)
+        if r:
+            open_dialog(self, self.app, "master_import", r["id"])
 
     def discard(self):
         r = self.table.one(self)
@@ -359,7 +365,7 @@ class MigrationTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x")
         for t, cmd in (("讀入Excel（final工作表）", self.stage), ("合併候選", self.candidates),
-                       ("會議合併候選", self.meeting_candidates),
+                       ("會議合併候選", self.meeting_candidates), ("來源檔", self.source),
                        ("確認寫入選取列", self.commit), ("略過", self.skip)):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=2)
         self.only = tk.StringVar(value="待核對")
@@ -411,7 +417,7 @@ class MigrationTab(ttk.Frame):
     def stage(self):
         path = filedialog.askopenfilename(parent=self, filetypes=[("Excel", "*.xlsx")])
         if path:
-            r = self.app.run(MG.stage_workbook, self.app.ctx(), path)
+            r = self.app.run(MG.stage_workbook, self.app.ctx(), path, pending_dir=self.app.ws.pending_dir)
             if r:
                 W.info(self, f"讀入 {r['total']} 列：新暫存 {r['new']}、先前已暫存 {r['already_staged']}（不重複）。")
                 self.refresh()
@@ -423,6 +429,11 @@ class MigrationTab(ttk.Frame):
         c = MG.merge_candidates(self.app.con, sha)
         W.TextView(self, "合併候選（不自動合併；確認範圍相同時，寫入時選既有認定）",
                    "\n".join(f"{x['key']}＝{x['value']}：列 {x['rows']}" for x in c) or "無")
+
+    def source(self):
+        r = self.table.one(self)
+        if r:
+            open_dialog(self, self.app, "migration_batch", r["_r"]["batch_id"])
 
     def meeting_candidates(self):
         """同原文會議不自動合併；使用者逐組確認後才合併。"""

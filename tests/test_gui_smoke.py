@@ -39,7 +39,8 @@ def test_gui_attachment_entries_and_admin_guard(tmp_path, monkeypatch):
     ws.start_edit()
     ctx = ws.ctx()
     set_user(ctx, "viewer", [ROLE_VIEWER])
-    iid = M.stage_import(ctx, write_master(tmp_path / "m.csv", BASE_ROWS), MAPPING, base_date="2026-10-01")
+    iid = M.stage_import(ctx, write_master(tmp_path / "m.csv", BASE_ROWS), MAPPING, base_date="2026-10-01",
+                         pending_dir=ws.pending_dir)
     M.activate(ctx, iid)
     cid = C.create_case(ctx, subject="GUI案", drugs=["B000004100"])
     mid = C.create_meeting(ctx, meeting_type="專家", name="專家會議", meeting_date="2026-05-01")
@@ -63,7 +64,8 @@ def test_gui_attachment_entries_and_admin_guard(tmp_path, monkeypatch):
     cases = [("case_record", cid, ["case_record", "meeting_agenda", "decision"]),
              ("meeting", mid, ["meeting", "meeting_agenda", "decision"]),
              ("recognition_revision", rev, ["recognition_revision", "decision"]),
-             ("price_action", pa, ["price_action"]), ("contract", kid, ["contract"])]
+             ("price_action", pa, ["price_action"]), ("contract", kid, ["contract"]),
+             ("master_import", iid, ["master_import"])]
     for account in ("admin", "viewer"):
         q = Workspace(tmp_path / f"q-{account}", s.root, account)
         q.refresh_view()
@@ -81,10 +83,11 @@ def test_gui_attachment_entries_and_admin_guard(tmp_path, monkeypatch):
                 d.open()
             d.destroy()
         assert not [m for m in msgs if m[0] == "error"], msgs
-        assert len(opened) == 10 and all(open(p, "rb").read() == b"pdfdata" for p in opened)
+        assert len(opened) == 11 and sum(open(p, "rb").read() == b"pdfdata" for p in opened) == 10
         tabs = {type(t).__name__: t for t in app.tabs}
         for name in ("CaseTab", "MeetingTab", "ContractTab", "RecognitionTab", "AnnounceTab"):
             assert callable(tabs[name].attach)
+        assert callable(tabs["MasterTab"].source) and callable(tabs["MigrationTab"].source)
         msgs.clear()
         tabs["AdminTab"].backup()
         if account == "viewer":

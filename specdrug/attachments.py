@@ -12,6 +12,7 @@ from .db import get_setting
 from .util import new_id, sha256_file, utc_now
 
 ENTITIES = ("case_record", "meeting", "meeting_agenda", "decision", "contract", "recognition_revision", "price_action")
+SOURCE_ENTITIES = ("master_import", "migration_batch")  # 系統保存之來源檔，不經一般上傳
 
 
 def storage_key(sha: str) -> str:
@@ -33,6 +34,18 @@ def add_attachment(ctx: Ctx, src_path, entity, entity_id, pending_dir: Path) -> 
     limit = int(get_setting(ctx.con, "attachment_max_mb", "50")) * 1024 * 1024
     if size > limit:
         raise BizError(f"檔案超過上限 {limit // 1024 // 1024}MB。")
+    return _store(ctx, src, entity, entity_id, pending_dir)
+
+
+def save_source(ctx: Ctx, src_path, entity, entity_id, pending_dir: Path) -> str:
+    """主檔匯入／Excel移轉來源檔以雜湊鍵保存（§7.9、§12）；呼叫端已檢查權限，不套用一般上傳大小上限。"""
+    if entity not in SOURCE_ENTITIES:
+        raise BizError("不支援的來源檔關聯對象。")
+    return _store(ctx, Path(src_path), entity, entity_id, pending_dir)
+
+
+def _store(ctx: Ctx, src: Path, entity, entity_id, pending_dir: Path) -> str:
+    size = src.stat().st_size
     sha = sha256_file(src)
     key = storage_key(sha)
     dst = Path(pending_dir) / key
@@ -131,6 +144,12 @@ def attachment_targets(con, entity, entity_id) -> list[tuple[str, str, str]]:
     if entity == "price_action":
         pa = con.execute("SELECT drug_code, effective_date FROM price_action WHERE id=?", (entity_id,)).fetchone()
         return [(entity, entity_id, f"調高紀錄：{pa['drug_code']} 生效 {pa['effective_date'] or '待填'}")]
+    if entity == "master_import":
+        m = con.execute("SELECT source_name, base_date FROM master_import WHERE id=?", (entity_id,)).fetchone()
+        return [(entity, entity_id, f"主檔來源：{m['source_name']}（基準日 {m['base_date'] or '未指定'}）")]
+    if entity == "migration_batch":
+        b = con.execute("SELECT source_name, sheet FROM migration_batch WHERE id=?", (entity_id,)).fetchone()
+        return [(entity, entity_id, f"移轉來源：{b['source_name']}#{b['sheet']}")]
     if entity in ("meeting_agenda", "decision"):
         return [(entity, entity_id, "議案" if entity == "meeting_agenda" else "決議")]
     raise BizError("不支援的附件關聯對象。")

@@ -153,7 +153,8 @@ def parse_row(raw: dict) -> tuple[dict, list[str]]:
 
 # ---------------- 暫存 ----------------
 
-def stage_workbook(ctx: Ctx, path, sheet="final") -> dict:
+def stage_workbook(ctx: Ctx, path, sheet="final", pending_dir=None) -> dict:
+    """pending_dir：來源檔以雜湊鍵保存為附件的本機待上傳區。"""
     ctx.require(ROLE_CLERK, ROLE_REVIEWER)
     import openpyxl
     sha = sha256_file(path)
@@ -188,6 +189,9 @@ def stage_workbook(ctx: Ctx, path, sheet="final") -> dict:
                 (new_id(), batch_id, sha, sheet, no, json.dumps(raw, ensure_ascii=False, default=str),
                  json.dumps(parsed, ensure_ascii=False, default=str), json.dumps(issues, ensure_ascii=False)))
             new += 1
+        if pending_dir:
+            from .attachments import save_source
+            save_source(ctx, path, "migration_batch", batch_id, pending_dir)
         audit(ctx, "migration_batch", batch_id, "暫存", after={"source": os.path.basename(str(path)), "sha256": sha,
                                                               "new": new, "existing": existing})
     return {"batch_id": batch_id, "sha256": sha, "new": new, "already_staged": existing, "total": len(rows)}
