@@ -128,18 +128,21 @@ def evaluator(con) -> rules.Evaluator:
                            json.loads(get_setting(con, "unit_conversions", "{}")))
 
 
+def missing_fields(con, rule: dict, import_id: str) -> list[str]:
+    """規則用到、但此主檔版本未映射的欄位（缺少時該規則停用，不以空白當不符合）。"""
+    need = set()
+    for f in rules.fields_used(rule):
+        col = rules.FIELDS[f][2]
+        need |= set(col) if isinstance(col, tuple) else {col}
+    return sorted(need - mapped_fields(con, import_id) - {"drug_code"})
+
+
 def preview(con, rule: dict, import_id: str) -> dict:
     """依主檔版本預覽符合名單；空規則、未映射欄位均報錯。"""
     if not import_id:
         raise BizError("尚未選取主檔版本。")
     rules.validate(rule)
-    used = rules.fields_used(rule)
-    available = mapped_fields(con, import_id)
-    need = set()
-    for f in used:
-        col = rules.FIELDS[f][2]
-        need |= set(col) if isinstance(col, tuple) else {col}
-    missing = sorted(need - available - {"drug_code"})
+    missing = missing_fields(con, rule, import_id)
     if missing:
         raise BizError("此主檔版本未映射欄位：" + "、".join(missing) + "；相關規則停用，請改用含該欄位的主檔或修改條件。")
     ev = evaluator(con)

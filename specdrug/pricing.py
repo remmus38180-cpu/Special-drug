@@ -347,8 +347,12 @@ def compare_master(con, import_id, day=None) -> list[dict]:
 
 
 def generate_diff_todos(ctx: Ctx, new_import_id) -> int:
-    """新主檔匯入後比對已確認認定：新符合、不再符合、分組異動 → 差異待辦。不自動註記或調高。"""
-    from .recognition import evaluator
+    """新主檔匯入後比對已確認認定：新符合、不再符合、分組異動 → 差異待辦。不自動註記或調高。
+
+    規則用到新主檔未映射的欄位時，跳過該認定並產生「規則停用」待辦說明原因（§7.2）。
+    """
+    from .master_import import MASTER_FIELDS
+    from .recognition import evaluator, missing_fields
     import json as _j
     ctx.require(*EDIT_ROLES)
     ev = evaluator(ctx.con)
@@ -361,6 +365,12 @@ def generate_diff_todos(ctx: Ctx, new_import_id) -> int:
             rule = _j.loads(rev["rule_json"])
             scope = revision_scope(ctx.con, rev["id"])
             if not scope:
+                continue
+            missing = missing_fields(ctx.con, rule, new_import_id)
+            if missing:
+                count += _todo(ctx, "規則停用", None, None, rev["id"], new_import_id,
+                               "新主檔未映射規則欄位：" + "、".join(f"{MASTER_FIELDS.get(c, c)}（{c}）" for c in missing)
+                               + "；此認定本次停用比對，未產生新符合／不再符合，請改用含該欄位的主檔或修改條件")
                 continue
             snap_groups = {r[0]: r[1] for r in ctx.con.execute(
                 "SELECT sm.drug_code, sm.group_code FROM scope_member sm JOIN scope_snapshot ss ON ss.id=sm.snapshot_id"
@@ -383,7 +393,7 @@ def generate_diff_todos(ctx: Ctx, new_import_id) -> int:
 
 
 def _todo(ctx, kind, code, group, rev_id, import_id, detail) -> int:
-    exists = ctx.con.execute("SELECT 1 FROM review_item WHERE kind=? AND drug_code=? AND revision_id=? AND import_id=?",
+    exists = ctx.con.execute("SELECT 1 FROM review_item WHERE kind=? AND drug_code IS ? AND revision_id=? AND import_id=?",
                              (kind, code, rev_id, import_id)).fetchone()
     if exists:
         return 0

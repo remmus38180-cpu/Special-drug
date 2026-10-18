@@ -134,3 +134,22 @@ def test_drug_timeline_lists_all_revisions(ctx, master):
     assert len(rec_events) == 4
     assert {e["status"] for e in rec_events} == {"已取消", "已失效", "有效"}
     assert any("2020-01-01～2022-01-01" in e["text"] for e in rec_events)
+
+
+# ---------------- §7.2 新主檔缺規則欄位：停用該認定比對 ----------------
+
+def test_diff_todos_skip_rule_with_unmapped_field(ctx, master, tmp_path):
+    from conftest import BASE_ROWS, write_master
+    from specdrug import master_import as M
+    from specdrug import pricing as P
+    rec = R.create_recognition(ctx, name="ATC認定")
+    _confirmed_rev(ctx, rec, master, {"field": "atc_code", "op": "eq", "value": "L04AA03"}, "特殊藥品", "2020-01-01")
+    mapping = {k: v for k, v in MAPPING.items() if k != "atc_code"}
+    iid2 = M.stage_import(ctx, write_master(tmp_path / "no_atc.csv", BASE_ROWS), mapping, base_date="2026-11-01")
+    M.activate(ctx, iid2)
+    P.generate_diff_todos(ctx, iid2)
+    P.generate_diff_todos(ctx, iid2)  # 重跑不重複
+    kinds = [r[0] for r in ctx.con.execute("SELECT kind FROM review_item")]
+    assert kinds == ["規則停用"]
+    detail = ctx.con.execute("SELECT detail FROM review_item").fetchone()[0]
+    assert "atc_code" in detail
