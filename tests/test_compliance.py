@@ -357,3 +357,32 @@ def test_editlock_valid_detects_lost_lock(tmp_path):
     other.release()
     lock.release()
 
+
+def test_switch_retries_permission_error(tmp_path, monkeypatch):
+    from specdrug import store as S
+    s, ws = _shared(tmp_path)
+    ws.start_edit()
+    real = S.os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        if str(dst).endswith("current.json") and calls["n"] < 2:
+            calls["n"] += 1
+            raise PermissionError("檔案被占用")
+        return real(src, dst)
+    monkeypatch.setattr(S.os, "replace", flaky)
+    monkeypatch.setattr(S.time, "sleep", lambda x: None)
+    rid = ws.publish()
+    assert s.current()["release_id"] == rid and calls["n"] == 2
+    before = s.current()["release_id"]
+
+    def always(src, dst):
+        if str(dst).endswith("current.json"):
+            raise PermissionError("檔案被占用")
+        return real(src, dst)
+    monkeypatch.setattr(S.os, "replace", always)
+    with pytest.raises(PermissionError):
+        ws.publish()
+    assert s.current()["release_id"] == before
+    assert not list(s.control.glob(".current.json.*.tmp"))
+    ws.close()

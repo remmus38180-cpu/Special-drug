@@ -13,6 +13,7 @@ import shutil
 import socket
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -21,6 +22,7 @@ from .db import SCHEMA_VERSION, Tx, open_db
 from .util import new_id, sha256_file, utc_now
 
 DIRS = ("app", "control", "releases", "attachments", "staging", "backups")
+SWITCH_RETRIES = 5  # 版本指標替換遇PermissionError之重試次數（退避0.05～0.8秒）
 
 
 class StoreError(Exception):
@@ -39,13 +41,28 @@ class PublishConflict(StoreError):
     pass
 
 
-def _write_json_atomic(path: Path, data: dict) -> None:
+def _write_json_atomic(path: Path, data: dict, retries: int = 0, before_retry=None) -> None:
+    """寫暫存檔後以os.replace不可分割替換。retries>0時，替換遇PermissionError（如防毒或他人短暫占用）
+    以有限次指數退避重試；每次重試前呼叫before_retry（如確認仍持有編輯權）。最終失敗清除暫存檔並拋出。"""
     tmp = path.with_name(f".{path.name}.{new_id()}.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        for attempt in range(retries + 1):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt >= retries:
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
+                if before_retry:
+                    before_retry()
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def _read_json(path: Path):
@@ -299,9 +316,13 @@ class SharedStore:
         cur = self.current()
         if (cur["release_id"] if cur else None) != manifest["parent"]:
             raise PublishConflict("目前版本已變更，未切換。")
+        def still_locked():
+            if not lock.valid():
+                raise LockLost("切換版本重試期間編輯權失效，未切換；請重新取得編輯權後以同一操作重試。")
         _write_json_atomic(self.control / "current.json", {
             "release_id": manifest["release_id"], "parent": manifest["parent"], "at": utc_now(),
-            "sha256": manifest["files"]["data.sqlite"], "schema_version": manifest["schema_version"]})
+            "sha256": manifest["files"]["data.sqlite"], "schema_version": manifest["schema_version"]},
+            retries=SWITCH_RETRIES, before_retry=still_locked)
 
     def _ensure_attachment(self, key, sha, pending_dir):
         dst = storage_path(self.attachments, key)
