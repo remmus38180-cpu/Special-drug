@@ -386,3 +386,26 @@ def test_switch_retries_permission_error(tmp_path, monkeypatch):
     assert s.current()["release_id"] == before
     assert not list(s.control.glob(".current.json.*.tmp"))
     ws.close()
+
+
+# ---------------- v0.3.1 B17、B18 ----------------
+
+def _scoped_rev(ctx, master):
+    rec = R.create_recognition(ctx, name="B17B18")
+    return _confirmed_rev(ctx, rec, master, B4, "特殊藥品", "2020-01-01")
+
+
+_READY = dict(price_after="150", effective_date="2026-11-01", announce_doc_no="公告1", announce_date="2026-10-20",
+              status="已核定")
+
+
+def test_B17_pending_contract_requirement_confirmable_marked_incomplete(ctx, master):
+    from specdrug import pricing as P
+    rev = _scoped_rev(ctx, master)
+    pa = P.create_price_action(ctx, revision_id=rev, drug_code="B000004100", contract_requirement="待確認",
+                               completeness="完整", **_READY)
+    assert P.validate_price_action(ctx.con, R.get(ctx.con, "price_action", pa)) == []
+    P.confirm_announcement(ctx, price_action_ids=[pa])
+    row = ctx.con.execute("SELECT confirm_status, completeness FROM price_action WHERE id=?", (pa,)).fetchone()
+    assert tuple(row) == ("已確認", "不完整")
+

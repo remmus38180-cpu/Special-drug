@@ -197,9 +197,7 @@ def validate_price_action(con, pa: dict) -> list[str]:
     elif req == "當時無須簽約":
         if not pa["requirement_basis"]:
             errs.append("選「當時無須簽約」須填說明／依據")
-    else:
-        if pa["completeness"] != "不完整":
-            errs.append("簽約要求待確認；歷史資料缺漏須標記「不完整」才可保存，現行案件須確認簽約要求")
+    # 簽約要求「待確認」：不以案件來源限制確認，由複核登記者依個案判斷；確認時系統標示「不完整」（B17）
     return errs
 
 
@@ -269,9 +267,12 @@ def confirm_announcement(ctx: Ctx, *, price_action_ids=(), annotation_ids=(), op
     with ctx.tx():
         now = utc_now()
         for pid in price_action_ids:
-            if get(ctx, "price_action", pid)["confirm_status"] != "已確認":
-                update(ctx, "price_action", pid, {"confirm_status": "已確認", "confirmed_by": ctx.actor,
-                                                  "confirmed_at": now})
+            pa = get(ctx, "price_action", pid)
+            if pa["confirm_status"] != "已確認":
+                changes = {"confirm_status": "已確認", "confirmed_by": ctx.actor, "confirmed_at": now}
+                if pa["contract_requirement"] == "待確認":
+                    changes["completeness"] = "不完整"
+                update(ctx, "price_action", pid, changes)
         for aid in annotation_ids:
             if get(ctx, "annotation_event", aid)["confirm_status"] != "已確認":
                 update(ctx, "annotation_event", aid, {"confirm_status": "已確認", "confirmed_by": ctx.actor,
