@@ -1,0 +1,2538 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="version" content="0.4.0">
+<meta name="schema-version" content="1">
+<meta name="build-date" content="2026-10-18">
+<meta name="commit" content="65cc4dd">
+<title>特殊藥品管理 v0.4.0</title>
+<style>
+/* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
+:root {
+  --bg: #f4f4f2; --panel: #ffffff; --line: #2b2b2b; --text: #1e1e1e; --muted: #555555;
+  --accent: #81d8cf; --accent-weak: #dcf3f0; --accent-deep: #3e8f86;
+  --pink: #f7e1e5; --pink-deep: #8a2f40;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body {
+  font-family: "LXGW WenKai TC", "霞鶩文楷 TC", "Microsoft JhengHei", "微軟正黑體", sans-serif;
+  font-size: 15px; line-height: 1.6;
+}
+#app { max-width: 1280px; margin: 0 auto; padding: 0 16px 32px; }
+header.top { display: flex; align-items: baseline; gap: 16px; padding: 12px 0 4px; border-bottom: 3px solid var(--accent); flex-wrap: wrap; }
+header.top h1 { font-size: 20px; margin: 0; }
+.ver { color: var(--muted); font-size: 13px; }
+.statusbar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 6px 8px; margin: 8px 0; background: var(--panel); border: 1px solid var(--line); font-size: 14px; }
+.chip { border: 1px solid var(--line); padding: 0 8px; background: var(--accent-weak); }
+.chip-edit { background: var(--accent); font-weight: bold; }
+.chip-warn { background: var(--pink); font-weight: bold; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+button {
+  font: inherit; padding: 3px 12px; cursor: pointer; color: var(--text);
+  background: var(--panel); border: 2px solid var(--line); border-radius: 0;
+}
+button.primary { background: var(--accent-weak); }
+button:active { color: var(--text); }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--accent-deep); outline-offset: 1px; }
+button:disabled { cursor: not-allowed; border-style: dashed; color: #777; }
+input[type=text], input[type=password], input[type=number] { font: inherit; border: 1px solid var(--line); padding: 2px 6px; background: #fff; }
+.tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 2px solid var(--line); margin-top: 8px; }
+.tab { border-bottom: none; margin-right: -2px; background: var(--bg); }
+.tab-on { background: var(--accent-weak); font-weight: bold; text-decoration: underline; }
+.panel { background: var(--panel); border: 1px solid var(--line); padding: 12px 16px; margin: 12px 0; overflow-x: auto; }
+.panel h2 { font-size: 17px; margin: 0 0 8px; }
+.panel h3 { font-size: 15px; margin: 16px 0 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; vertical-align: top; }
+th { background: var(--accent-weak); position: sticky; top: 0; }
+.note { color: var(--muted); font-size: 13px; }
+.warn-text { color: var(--pink-deep); font-weight: bold; }
+dialog.dlg { border: 2px solid var(--line); padding: 16px 20px; max-width: 640px; background: var(--panel); color: var(--text); }
+dialog.dlg::backdrop { background: rgba(40, 40, 40, 0.35); }
+dialog.dlg h2 { font-size: 17px; margin: 0 0 8px; border-bottom: 2px solid var(--accent); }
+.dlg-buttons { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 12px; }
+@media print {
+  .toolbar, .tabs, button { display: none; }
+  .statusbar { position: static; }
+}
+
+</style>
+</head>
+<body>
+<noscript>本程式須啟用JavaScript。</noscript>
+<div id="app"></div>
+<script>
+"use strict";
+// ---- ui/dom.js ----
+const __m_ui_dom_js = (function () {
+// 極小DOM輔助：一律以 textContent 放文字，不用 innerHTML。
+function h(tag, props, ...children) {
+  const el = document.createElement(tag);
+  if (props) {
+    for (const [k, v] of Object.entries(props)) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k === 'on') for (const [ev, fn] of Object.entries(v)) el.addEventListener(ev, fn);
+      else if (k === 'style') el.setAttribute('style', v);
+      else if (k in el && typeof v !== 'string') el[k] = v;
+      else el.setAttribute(k, v === true ? '' : String(v));
+    }
+  }
+  append(el, children);
+  return el;
+}
+
+function append(el, children) {
+  for (const c of children) {
+    if (c === null || c === undefined || c === false) continue;
+    if (Array.isArray(c)) append(el, c);
+    else if (c instanceof Node) el.appendChild(c);
+    else el.appendChild(document.createTextNode(String(c)));
+  }
+}
+
+function clear(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+  return el;
+}
+
+function table(headers, rows) {
+  return h('table', null,
+    h('thead', null, h('tr', null, headers.map((x) => h('th', { text: x })))),
+    h('tbody', null, rows.map((r) => h('tr', null, r.map((c) => (c instanceof Node ? h('td', null, c) : h('td', { text: c === null || c === undefined ? '' : String(c) })))))));
+}
+
+// 模態對話框；buttons：[{label, value, primary}]；回傳 Promise<value>（Esc→null）
+function dialog(title, body, buttons) {
+  return new Promise((resolve) => {
+    const dlg = h('dialog', { class: 'dlg', 'aria-label': title });
+    const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
+    dlg.appendChild(h('h2', { text: title }));
+    dlg.appendChild(h('div', { class: 'dlg-body' }, body));
+    const bar = h('div', { class: 'dlg-buttons' });
+    for (const b of buttons) {
+      bar.appendChild(h('button', { type: 'button', class: b.primary ? 'primary' : '', text: b.label, on: { click: () => {
+        if (b.validate && !b.validate()) return;
+        done(b.value);
+      } } }));
+    }
+    dlg.appendChild(bar);
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+}
+
+function alertBox(title, ...lines) {
+  return dialog(title, lines.map((l) => (l instanceof Node ? l : h('p', { text: l }))), [{ label: '確定', value: true, primary: true }]);
+}
+
+return { h, clear, table, dialog, alertBox };
+})();
+
+// ---- ui/files.js ----
+const __m_ui_files_js = (function () {
+// 使用者觸發之另存／下載。以另存對話框帶入預設檔名為主；不支援時改用下載。
+async function saveTextAs(suggestedName, text, mime = 'application/json') {
+  const blob = new Blob([text], { type: mime + ';charset=utf-8' });
+  return saveBlobAs(suggestedName, blob);
+}
+
+async function saveBlobAs(suggestedName, blob) {
+  if (typeof window.showSaveFilePicker === 'function') {
+    let fh;
+    try {
+      fh = await window.showSaveFilePicker({ suggestedName });
+    } catch (e) {
+      if (e && e.name === 'AbortError') return { saved: false, cancelled: true };
+      throw e;
+    }
+    const w = await fh.createWritable();
+    try {
+      await w.write(blob);
+      await w.close();
+    } catch (e) {
+      try { await w.abort(); } catch (e2) { /* 忽略 */ }
+      throw e;
+    }
+    return { saved: true, name: fh.name, method: 'saveAs' };
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = suggestedName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return { saved: true, name: suggestedName, method: 'download' };
+}
+
+return { saveTextAs, saveBlobAs };
+})();
+
+// ---- core/selfcheck.js ----
+const __m_core_selfcheck_js = (function () {
+// 啟動自檢（第4.3節）。env 為瀏覽器全域物件（測試時可傳假物件）。
+function selfCheck(env) {
+  const items = [];
+  const add = (key, label, ok, effect, detail) => items.push({ key, label, ok: !!ok, effect, detail: detail || '' });
+  const secure = !!env.isSecureContext;
+  const crypto = env.crypto;
+  const subtle = !!(crypto && crypto.subtle && typeof crypto.subtle.digest === 'function');
+  const uuid = !!(crypto && typeof crypto.randomUUID === 'function');
+  const fsAccess = typeof env.showDirectoryPicker === 'function';
+  const saveAs = typeof env.showSaveFilePicker === 'function';
+  const idb = !!env.indexedDB;
+  const locks = !!(env.navigator && env.navigator.locks && typeof env.navigator.locks.request === 'function');
+  const worker = typeof env.Worker === 'function';
+  add('secure', '安全環境（isSecureContext）', secure, '停用編輯');
+  add('subtle', 'crypto.subtle（SHA-256）', subtle, '停用編輯');
+  add('uuid', 'crypto.randomUUID（主鍵）', uuid, '停用編輯');
+  add('fsAccess', '檔案系統存取（showDirectoryPicker）', fsAccess, '唯讀模式：僅能開啟備份zip查詢及匯出');
+  add('idb', 'IndexedDB（記住資料夾授權、當機復原草稿）', idb, '可編輯，但無當機復原');
+  add('locks', 'navigator.locks（防止同瀏覽器兩分頁同時編輯）', locks, '可編輯，但請勿開兩分頁');
+  add('saveAs', '另存對話框（showSaveFilePicker）', saveAs, '匯出改用瀏覽器下載，檔名可能無法帶入');
+  add('worker', 'Web Worker', worker, '大量匯入時畫面可能停頓');
+  const reasons = [];
+  if (!secure) reasons.push('非安全環境');
+  if (!subtle) reasons.push('無法計算SHA-256');
+  if (!uuid) reasons.push('無法產生UUID');
+  const canFolder = secure && subtle && uuid && fsAccess;
+  if (!fsAccess) reasons.push('瀏覽器不支援檔案系統存取');
+  return {
+    items,
+    caps: { secure, subtle, uuid, fsAccess, saveAs, idb, locks, worker },
+    canEdit: canFolder,
+    canFolder,
+    readonlyReasons: reasons,
+  };
+}
+
+return { selfCheck };
+})();
+
+// ---- core/errors.js ----
+const __m_core_errors_js = (function () {
+// 業務／協定錯誤：code 供程式判斷，message 為繁體中文說明（第11.2節）。
+class SpecError extends Error {
+  constructor(code, message, detail) {
+    super(message);
+    this.name = 'SpecError';
+    this.code = code;
+    this.detail = detail === undefined ? null : detail;
+  }
+}
+
+function errText(e) {
+  if (!e) return '未知錯誤';
+  if (e instanceof SpecError) return e.message;
+  return (e.name ? e.name + '：' : '') + (e.message || String(e));
+}
+
+return { SpecError, errText };
+})();
+
+// ---- core/util.js ----
+const __m_core_util_js = (function () {
+// 共用小工具：時間格式、雜湊、穩定序列化。不碰DOM。
+
+function pad(n, w = 2) {
+  return String(n).padStart(w, '0');
+}
+
+function isoUtc(ms) {
+  return new Date(ms).toISOString();
+}
+
+// 20261018T024501Z（版本檔名用，UTC）
+function compactUtc(ms) {
+  const d = new Date(ms);
+  return d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate()) + 'T' +
+    pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z';
+}
+
+// Asia/Taipei 固定 UTC+8（台灣無日光節約時間）
+function taipei(ms) {
+  const d = new Date(ms + 8 * 3600 * 1000);
+  return {
+    y: d.getUTCFullYear(), mo: pad(d.getUTCMonth() + 1), d: pad(d.getUTCDate()),
+    h: pad(d.getUTCHours()), mi: pad(d.getUTCMinutes()), s: pad(d.getUTCSeconds()),
+  };
+}
+
+function taipeiDisplay(ms) {
+  if (ms === null || ms === undefined || Number.isNaN(ms)) return '';
+  const t = taipei(ms);
+  return `${t.y}-${t.mo}-${t.d} ${t.h}:${t.mi}:${t.s}`;
+}
+
+function taipeiHM(ms) {
+  const t = taipei(ms);
+  return `${t.h}:${t.mi}`;
+}
+
+// 20261018-124805（匯出檔名用，第11.5節）
+function taipeiCompact(ms) {
+  const t = taipei(ms);
+  return `${t.y}${t.mo}${t.d}-${t.h}${t.mi}${t.s}`;
+}
+
+function parseIso(s) {
+  const v = Date.parse(s);
+  return Number.isNaN(v) ? null : v;
+}
+
+function hex(buf) {
+  const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < b.length; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+  return s;
+}
+
+function fromHex(s) {
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
+  return out;
+}
+
+function utf8(text) {
+  return new TextEncoder().encode(text);
+}
+
+async function sha256Bytes(bytes) {
+  return hex(await globalThis.crypto.subtle.digest('SHA-256', bytes));
+}
+
+async function sha256Text(text) {
+  return sha256Bytes(utf8(text));
+}
+
+function newId() {
+  return globalThis.crypto.randomUUID();
+}
+
+function randomHex(nBytes) {
+  const b = new Uint8Array(nBytes);
+  globalThis.crypto.getRandomValues(b);
+  return hex(b);
+}
+
+// 鍵排序之JSON，供雜湊鏈計算
+function stableStringify(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  const keys = Object.keys(v).filter((k) => v[k] !== undefined).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+}
+
+function deepClone(v) {
+  return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+}
+
+function revLabel(rev) {
+  return 'r' + pad(rev, 6);
+}
+
+return { pad, isoUtc, compactUtc, taipeiDisplay, taipeiHM, taipeiCompact, parseIso, hex, fromHex, utf8, sha256Bytes, sha256Text, newId, randomHex, stableStringify, deepClone, revLabel };
+})();
+
+// ---- core/paths.js ----
+const __m_core_paths_js = (function () {
+// 資料夾結構（第4.4節）。所有檔名由程式產生並以白名單驗證；不以使用者輸入組成路徑。
+const { SpecError } = __m_core_errors_js;
+const { pad, compactUtc } = __m_core_util_js;
+const P = {
+  META: 'specdrug.json',
+  TOKEN: 'control/editing.json',
+  KEYWORD: 'control/keyword.json',
+  CURRENT: 'data/current.json',
+  VERSIONS: 'data/versions',
+  EXPORT_LOG: 'logs/export-log.jsonl',
+};
+
+const FILE_PATTERNS = [
+  /^specdrug\.json$/,
+  /^control\/editing\.json$/,
+  /^control\/keyword\.json$/,
+  /^control\/_writetest-[0-9a-f-]{36}\.tmp$/,
+  /^data\/current\.json$/,
+  /^data\/versions\/r\d{6}-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$/,
+  /^masters\/[0-9a-f-]{36}\.json$/,
+  /^attachments\/[0-9a-f]{2}\/[0-9a-f]{64}$/,
+  /^logs\/export-log\.jsonl$/,
+];
+
+const DIR_PATTERNS = [/^$/, /^control$/, /^data$/, /^data\/versions$/, /^masters$/, /^attachments$/, /^attachments\/[0-9a-f]{2}$/, /^backups$/, /^logs$/];
+
+function isValidPath(p) {
+  return typeof p === 'string' && FILE_PATTERNS.some((re) => re.test(p));
+}
+
+function assertPath(p) {
+  if (!isValidPath(p)) throw new SpecError('BAD_PATH', `不允許的檔案路徑：${p}`);
+  return p;
+}
+
+function assertDir(d) {
+  if (typeof d !== 'string' || !DIR_PATTERNS.some((re) => re.test(d))) {
+    throw new SpecError('BAD_PATH', `不允許的資料夾路徑：${d}`);
+  }
+  return d;
+}
+
+function versionFileName(revision, ms, sha256) {
+  return `r${pad(revision, 6)}-${compactUtc(ms)}-${sha256.slice(0, 8)}.json`;
+}
+
+const VERSION_RE = /^r(\d{6})-(\d{8}T\d{6}Z)-([0-9a-f]{8})\.json$/;
+
+function parseVersionFileName(name) {
+  const m = VERSION_RE.exec(name);
+  if (!m) return null;
+  return { name, revision: Number(m[1]), stamp: m[2], sha8: m[3] };
+}
+
+function attachmentPath(sha256) {
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new SpecError('BAD_PATH', '附件雜湊格式錯誤');
+  return `attachments/${sha256.slice(0, 2)}/${sha256}`;
+}
+
+function masterPath(importId) {
+  return assertPath(`masters/${importId}.json`);
+}
+
+return { P, isValidPath, assertPath, assertDir, versionFileName, parseVersionFileName, attachmentPath, masterPath };
+})();
+
+// ---- core/version.js ----
+const __m_core_version_js = (function () {
+// 程式版本與資料結構版本（第11.5節）。建置腳本替換 __BUILD_DATE__、__COMMIT__。
+const APP_VERSION = '0.4.0';
+const SCHEMA_VERSION = 1;
+const BUILD_DATE = "2026-10-18";
+const BUILD_COMMIT = "65cc4dd";
+
+return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
+})();
+
+// ---- core/dataset.js ----
+const __m_core_dataset_js = (function () {
+// 業務資料集合（第6.2節）與設定。階段1只建立空集合；各集合欄位於後續階段補齊。
+const { SpecError } = __m_core_errors_js;
+const COLLECTIONS = [
+  'case_record', 'case_drug', 'recognition', 'recognition_revision', 'meeting', 'meeting_agenda',
+  'decision', 'decision_drug', 'revision_decision', 'master_import', 'scope_snapshot', 'scope_member',
+  'group_treatment', 'contract', 'contract_drug', 'price_action', 'annotation_event', 'attachment',
+  'attachment_link', 'op_log', 'review_item', 'migration_batch', 'migration_row',
+];
+
+// Q13：預設值，可於設定調整
+const DEFAULT_SETTINGS = {
+  heartbeat_sec: 30,
+  stale_min: 5,
+  keyword_max_fail: 5,
+  keyword_lock_sec: 30,
+  csv_header_notes: true,
+  attachment_max_mb: 50,
+};
+
+const SETTING_RULES = {
+  heartbeat_sec: { type: 'int', min: 5, max: 300, label: '心跳間隔（秒）' },
+  stale_min: { type: 'int', min: 1, max: 120, label: '視為已關閉（分鐘）' },
+  keyword_max_fail: { type: 'int', min: 1, max: 20, label: '關鍵詞連續輸錯次數' },
+  keyword_lock_sec: { type: 'int', min: 5, max: 3600, label: '輸錯鎖定（秒）' },
+  csv_header_notes: { type: 'bool', label: 'CSV加說明列' },
+  attachment_max_mb: { type: 'int', min: 1, max: 500, label: '附件大小上限（MB）' },
+};
+
+function settingLabel(key) {
+  return SETTING_RULES[key] ? SETTING_RULES[key].label : key;
+}
+
+function emptyData() {
+  const collections = {};
+  for (const name of COLLECTIONS) collections[name] = [];
+  return { collections, settings: { ...DEFAULT_SETTINGS } };
+}
+
+function effectiveSettings(data) {
+  return { ...DEFAULT_SETTINGS, ...((data && data.settings) || {}) };
+}
+
+// 欄位白名單＋值域檢查；回傳 {next, diff}
+function validateSettingsPatch(current, patch) {
+  const next = { ...DEFAULT_SETTINGS, ...current };
+  const diff = {};
+  for (const [k, raw] of Object.entries(patch)) {
+    const rule = SETTING_RULES[k];
+    if (!rule) throw new SpecError('FIELD_NOT_ALLOWED', `設定不允許修改欄位：${k}`);
+    let v;
+    if (rule.type === 'int') {
+      v = typeof raw === 'number' ? raw : Number(String(raw).trim());
+      if (!Number.isInteger(v) || v < rule.min || v > rule.max) {
+        throw new SpecError('BAD_VALUE', `${rule.label}須為 ${rule.min}～${rule.max} 的整數`);
+      }
+    } else {
+      if (typeof raw !== 'boolean') throw new SpecError('BAD_VALUE', `${rule.label}須為是／否`);
+      v = raw;
+    }
+    if (next[k] !== v) {
+      diff[k] = { from: next[k], to: v };
+      next[k] = v;
+    }
+  }
+  if (next.stale_min * 60 < next.heartbeat_sec * 3) {
+    throw new SpecError('BAD_VALUE', '「視為已關閉」時間須至少為心跳間隔的3倍');
+  }
+  return { next, diff };
+}
+
+return { COLLECTIONS, DEFAULT_SETTINGS, settingLabel, emptyData, effectiveSettings, validateSettingsPatch };
+})();
+
+// ---- core/audit.js ----
+const __m_core_audit_js = (function () {
+// 稽核紀錄：只追加；每筆含前一筆雜湊（第11.4節第5點）。
+const { sha256Text, stableStringify } = __m_core_util_js;
+const GENESIS_HASH = '0'.repeat(64);
+
+async function hashEvent(ev) {
+  const rest = { ...ev };
+  delete rest.hash;
+  return sha256Text(stableStringify(rest));
+}
+
+// drafts：尚未封存的事件；接在 prev 之後計算 seq、prev_hash、hash
+async function sealEvents(prev, drafts) {
+  const out = prev.slice();
+  let last = prev.length ? prev[prev.length - 1].hash : GENESIS_HASH;
+  for (const d of drafts) {
+    const ev = { ...d, seq: out.length + 1, prev_hash: last };
+    delete ev.hash;
+    ev.hash = await hashEvent(ev);
+    last = ev.hash;
+    out.push(ev);
+  }
+  return out;
+}
+
+async function verifyChain(events) {
+  if (!Array.isArray(events)) return { ok: false, index: -1, reason: '稽核紀錄格式錯誤' };
+  let last = GENESIS_HASH;
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (!ev || ev.seq !== i + 1) {
+      return { ok: false, index: i, seq: ev && ev.seq, reason: `第 ${i + 1} 筆序號不連續（記載 ${ev && ev.seq}）` };
+    }
+    if (ev.prev_hash !== last) {
+      return { ok: false, index: i, seq: ev.seq, reason: `第 ${ev.seq} 筆前一筆雜湊不符（中間紀錄可能被刪除或修改）` };
+    }
+    const h = await hashEvent(ev);
+    if (h !== ev.hash) {
+      return { ok: false, index: i, seq: ev.seq, reason: `第 ${ev.seq} 筆內容雜湊不符（紀錄可能被修改）` };
+    }
+    last = ev.hash;
+  }
+  return { ok: true, count: events.length, head: last };
+}
+
+function auditHead(events) {
+  return { count: events.length, hash: events.length ? events[events.length - 1].hash : GENESIS_HASH };
+}
+
+// 新版本之稽核必須完整包含前一版本之稽核（只追加）
+function isPrefixOf(oldEvents, newEvents) {
+  if (newEvents.length < oldEvents.length) return false;
+  for (let i = 0; i < oldEvents.length; i++) {
+    if (oldEvents[i].hash !== newEvents[i].hash) return false;
+  }
+  return true;
+}
+
+return { GENESIS_HASH, hashEvent, sealEvents, verifyChain, auditHead, isPrefixOf };
+})();
+
+// ---- core/keyword.js ----
+const __m_core_keyword_js = (function () {
+// 強制收回關鍵詞（第4.6節第10點）：只存加鹽雜湊，不存明文。
+const { SpecError } = __m_core_errors_js;
+const { P } = __m_core_paths_js;
+const { hex, fromHex, utf8, randomHex, isoUtc } = __m_core_util_js;
+const DEFAULT_ITERATIONS = 200000;
+const MIN_KEYWORD_LENGTH = 4;
+
+async function deriveKeyword(keyword, saltHex, iterations) {
+  const subtle = globalThis.crypto.subtle;
+  const key = await subtle.importKey('raw', utf8(keyword), 'PBKDF2', false, ['deriveBits']);
+  const bits = await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromHex(saltHex), iterations }, key, 256);
+  return hex(bits);
+}
+
+function checkNewKeyword(k) {
+  if (typeof k !== 'string' || k.trim().length < MIN_KEYWORD_LENGTH) {
+    throw new SpecError('BAD_KEYWORD', `關鍵詞至少 ${MIN_KEYWORD_LENGTH} 個字`);
+  }
+}
+
+async function buildKeywordRecord(keyword, { now, by, iterations = DEFAULT_ITERATIONS }) {
+  checkNewKeyword(keyword);
+  const salt = randomHex(16);
+  return {
+    format: 'specdrug-keyword',
+    algorithm: 'PBKDF2-SHA256',
+    iterations,
+    salt,
+    hash: await deriveKeyword(keyword, salt, iterations),
+    set_at: isoUtc(now),
+    set_by: by,
+  };
+}
+
+async function readKeywordRecord(fs) {
+  const r = await fs.read(P.KEYWORD);
+  if (!r) return null;
+  let rec;
+  try { rec = JSON.parse(r.text); } catch (e) { throw new SpecError('KEYWORD_BAD', '關鍵詞檔格式錯誤'); }
+  if (!rec || rec.format !== 'specdrug-keyword' || !rec.salt || !rec.hash) throw new SpecError('KEYWORD_BAD', '關鍵詞檔格式錯誤');
+  return rec;
+}
+
+async function verifyKeyword(fs, keyword) {
+  const rec = await readKeywordRecord(fs);
+  if (!rec) throw new SpecError('KEYWORD_MISSING', '尚未設定關鍵詞（control/keyword.json 不存在）');
+  const h = await deriveKeyword(String(keyword || ''), rec.salt, rec.iterations);
+  let diff = 0;
+  for (let i = 0; i < h.length; i++) diff |= h.charCodeAt(i) ^ rec.hash.charCodeAt(i);
+  return diff === 0 && h.length === rec.hash.length;
+}
+
+async function writeKeyword(fs, keyword, opts) {
+  const rec = await buildKeywordRecord(keyword, opts);
+  await fs.write(P.KEYWORD, JSON.stringify(rec, null, 2));
+  return rec;
+}
+
+// 修改須輸入原關鍵詞
+async function changeKeyword(fs, oldKeyword, newKeyword, opts) {
+  if (!(await verifyKeyword(fs, oldKeyword))) throw new SpecError('KEYWORD_WRONG', '原關鍵詞不正確');
+  return writeKeyword(fs, newKeyword, opts);
+}
+
+// 分頁內連續輸錯鎖定（預設5次／30秒）
+class KeywordGuard {
+  constructor({ clock, maxFail = 5, lockMs = 30000 }) {
+    this.clock = clock;
+    this.maxFail = maxFail;
+    this.lockMs = lockMs;
+    this.fails = 0;
+    this.lockedUntil = 0;
+  }
+
+  status() {
+    const now = this.clock.now();
+    if (now < this.lockedUntil) return { locked: true, remainMs: this.lockedUntil - now };
+    return { locked: false, remaining: this.maxFail - this.fails };
+  }
+
+  record(ok) {
+    if (ok) { this.fails = 0; return this.status(); }
+    this.fails += 1;
+    if (this.fails >= this.maxFail) {
+      this.lockedUntil = this.clock.now() + this.lockMs;
+      this.fails = 0;
+    }
+    return this.status();
+  }
+}
+
+return { DEFAULT_ITERATIONS, MIN_KEYWORD_LENGTH, deriveKeyword, buildKeywordRecord, readKeywordRecord, verifyKeyword, writeKeyword, changeKeyword, KeywordGuard };
+})();
+
+// ---- core/folder.js ----
+const __m_core_folder_js = (function () {
+// 資料夾初始化、開啟與儲存協定（第4.4、4.5節）。
+// fs 介面：read(path)→{text,lastModified,size}|null、readBytes(path)→{bytes,lastModified}|null、
+//          write(path,text)、create(path,data)（已存在即失敗）、remove(path)、list(dir)→[{name,kind}]
+const { SpecError } = __m_core_errors_js;
+const { P, versionFileName, parseVersionFileName, assertPath } = __m_core_paths_js;
+const { APP_VERSION, SCHEMA_VERSION } = __m_core_version_js;
+const { emptyData } = __m_core_dataset_js;
+const { sealEvents, verifyChain, auditHead, isPrefixOf } = __m_core_audit_js;
+const { buildKeywordRecord } = __m_core_keyword_js;
+const { isoUtc, newId, sha256Text, sha256Bytes, revLabel } = __m_core_util_js;
+const FOLDER_FORMAT = 'specdrug-folder';
+const DATA_FORMAT = 'specdrug-data';
+
+function json(v) {
+  return JSON.stringify(v, null, 2) + '\n';
+}
+
+function parseJson(text, code, what) {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new SpecError(code, `${what}不是有效的JSON：${e.message}`);
+  }
+}
+
+function releasedToken(now, note) {
+  return {
+    format: 'specdrug-editing',
+    state: 'released',
+    holder: null,
+    session_id: null,
+    heartbeat_seq: 0,
+    heartbeat_at: null,
+    released_at: isoUtc(now),
+    last_event: { type: note || 'released', at: isoUtc(now) },
+  };
+}
+
+async function inspectFolder(fs) {
+  const entries = await fs.list('');
+  if (!entries.length) return 'empty';
+  if (entries.some((e) => e.name === P.META && e.kind === 'file')) return 'specdrug';
+  return 'other';
+}
+
+function actor(session) {
+  return { user: session.user, pc: session.pc, session_id: session.id };
+}
+
+// 寫入一個版本檔：一次寫入、不覆寫；寫完讀回比對雜湊（第4.5節步驟3）
+async function writeVersionFile(fs, { folderId, revision, prev, now, session, saveId, data, audit, summary }) {
+  const header = {
+    format: DATA_FORMAT,
+    folder_id: folderId,
+    app_version: APP_VERSION,
+    schema_version: SCHEMA_VERSION,
+    revision,
+    prev_revision: prev ? prev.revision : null,
+    prev_sha256: prev ? prev.sha256 : null,
+    saved_at: isoUtc(now),
+    saved_by: actor(session),
+    save_id: saveId,
+    audit_head: auditHead(audit),
+    summary: summary || '',
+  };
+  const text = JSON.stringify({ header, data, audit }) + '\n';
+  const sha256 = await sha256Text(text);
+  const name = versionFileName(revision, now, sha256);
+  const path = `${P.VERSIONS}/${name}`;
+  await fs.create(path, text);
+  const back = await fs.read(path);
+  if (!back || (await sha256Text(back.text)) !== sha256) {
+    throw new SpecError('WRITE_VERIFY', `版本檔寫入後讀回雜湊不符：${name}`);
+  }
+  return { name, sha256, header };
+}
+
+function currentRecord({ revision, name, sha256, header }) {
+  return {
+    format: 'specdrug-current',
+    revision,
+    file: name,
+    sha256,
+    save_id: header.save_id,
+    saved_at: header.saved_at,
+    saved_by: header.saved_by,
+    app_version: header.app_version,
+    schema_version: header.schema_version,
+    prev_revision: header.prev_revision,
+    audit_head: header.audit_head,
+    summary: header.summary,
+  };
+}
+
+async function initFolder(fs, { clock, session, keyword, keywordIterations }) {
+  const kind = await inspectFolder(fs);
+  if (kind === 'specdrug') throw new SpecError('ALREADY_INIT', '此資料夾已是本系統資料夾，請直接開啟');
+  if (kind !== 'empty') throw new SpecError('NOT_EMPTY', '請選擇空資料夾作為新資料夾（此資料夾已有其他檔案）');
+  const now = clock.now();
+  const folderId = newId();
+  const by = actor(session);
+  const kwRec = await buildKeywordRecord(keyword, { now, by, iterations: keywordIterations });
+  const meta = {
+    format: FOLDER_FORMAT,
+    folder_id: folderId,
+    created_at: isoUtc(now),
+    created_by: by,
+    schema_version: SCHEMA_VERSION,
+    app_version: APP_VERSION,
+  };
+  await fs.create(P.META, json(meta));
+  await fs.create(P.KEYWORD, json(kwRec));
+  await fs.create(P.TOKEN, json(releasedToken(now, 'init')));
+  const audit = await sealEvents([], [{
+    id: newId(), at: isoUtc(now), user: session.user, pc: session.pc, app_version: APP_VERSION,
+    entity: 'folder', entity_id: folderId, action: '建立資料夾', diff: null, reason: null, op_id: null,
+  }]);
+  const v = await writeVersionFile(fs, {
+    folderId, revision: 0, prev: null, now, session, saveId: newId(), data: emptyData(), audit, summary: '建立資料夾',
+  });
+  await fs.create(P.CURRENT, json(currentRecord({ revision: 0, ...v })));
+  return meta;
+}
+
+async function readMeta(fs) {
+  const r = await fs.read(P.META);
+  if (!r) throw new SpecError('NOT_SPECDRUG', '此資料夾不是本系統資料夾（找不到 specdrug.json）');
+  const meta = parseJson(r.text, 'META_BAD', 'specdrug.json');
+  if (meta.format !== FOLDER_FORMAT || !meta.folder_id) throw new SpecError('META_BAD', 'specdrug.json 格式錯誤');
+  return meta;
+}
+
+async function readCurrent(fs) {
+  const r = await fs.read(P.CURRENT);
+  if (!r) throw new SpecError('CURRENT_MISSING', '找不到 data/current.json');
+  const cur = parseJson(r.text, 'CURRENT_BAD', 'data/current.json');
+  if (!cur || cur.format !== 'specdrug-current' || !Number.isInteger(cur.revision) || typeof cur.file !== 'string') {
+    throw new SpecError('CURRENT_BAD', 'data/current.json 格式錯誤');
+  }
+  return cur;
+}
+
+// 讀取並驗證一個版本檔。expect：{sha256, revision, save_id}（由current.json提供時）
+async function loadVersion(fs, name, { meta, expect } = {}) {
+  const errors = [];
+  const readonly = [];
+  const parsed = parseVersionFileName(name);
+  if (!parsed) {
+    errors.push({ code: 'VERSION_NAME', message: `版本檔名格式錯誤：${name}` });
+    return { ok: false, errors, readonly };
+  }
+  const path = assertPath(`${P.VERSIONS}/${name}`);
+  const r = await fs.read(path);
+  if (!r) {
+    errors.push({ code: 'VERSION_MISSING', message: `找不到版本檔：${name}` });
+    return { ok: false, errors, readonly };
+  }
+  const sha256 = await sha256Text(r.text);
+  if (expect && expect.sha256 && sha256 !== expect.sha256) {
+    errors.push({ code: 'VERSION_HASH', message: `版本檔 ${name} 的SHA-256與 current.json 記載不符（檔案可能被修改）`, where: name });
+  }
+  if (sha256.slice(0, 8) !== parsed.sha8) {
+    errors.push({ code: 'VERSION_HASH', message: `版本檔 ${name} 的SHA-256與檔名不符（檔案可能被修改）`, where: name });
+  }
+  let file;
+  try {
+    file = JSON.parse(r.text);
+  } catch (e) {
+    errors.push({ code: 'VERSION_JSON', message: `版本檔 ${name} 不是有效的JSON`, where: name });
+    return { ok: false, errors, readonly, sha256 };
+  }
+  const h = file && file.header;
+  if (!h || h.format !== DATA_FORMAT || !file.data || !Array.isArray(file.audit)) {
+    errors.push({ code: 'VERSION_FORMAT', message: `版本檔 ${name} 格式錯誤`, where: name });
+    return { ok: false, errors, readonly, sha256 };
+  }
+  if (h.revision !== parsed.revision) errors.push({ code: 'VERSION_REV', message: `版本檔 ${name} 內記載revision ${h.revision} 與檔名不符`, where: name });
+  if (expect && expect.revision !== undefined && h.revision !== expect.revision) {
+    errors.push({ code: 'VERSION_REV', message: `版本檔revision ${h.revision} 與 current.json 記載 ${expect.revision} 不符`, where: name });
+  }
+  if (expect && expect.save_id && h.save_id !== expect.save_id) {
+    errors.push({ code: 'VERSION_SAVEID', message: '版本檔save_id與 current.json 記載不符', where: name });
+  }
+  if (meta && h.folder_id !== meta.folder_id) {
+    errors.push({ code: 'VERSION_FOLDER', message: '版本檔不屬於此資料夾（folder_id不符）', where: name });
+  }
+  if (typeof h.schema_version !== 'number') {
+    errors.push({ code: 'VERSION_FORMAT', message: '版本檔缺資料結構版本', where: name });
+  } else if (h.schema_version > SCHEMA_VERSION) {
+    readonly.push(`資料結構版本 ${h.schema_version} 新於本程式（${SCHEMA_VERSION}），只可唯讀，請更新程式`);
+  } else if (h.schema_version < SCHEMA_VERSION) {
+    errors.push({ code: 'SCHEMA_OLD', message: `資料結構版本 ${h.schema_version} 較舊，須先執行資料結構升級`, where: name });
+  }
+  const chain = await verifyChain(file.audit);
+  if (!chain.ok) {
+    errors.push({ code: 'AUDIT_CHAIN', message: `稽核雜湊鏈中斷：${chain.reason}`, where: `${name} 稽核第 ${chain.index + 1} 筆` });
+  } else if (!h.audit_head || h.audit_head.count !== chain.count || h.audit_head.hash !== chain.head) {
+    errors.push({ code: 'AUDIT_HEAD', message: `稽核筆數或末筆雜湊與檔頭記載不符（末端紀錄可能被刪除）：記載 ${h.audit_head && h.audit_head.count} 筆，實有 ${chain.count} 筆`, where: name });
+  }
+  return { ok: errors.length === 0, errors, readonly, sha256, header: h, data: file.data, audit: file.audit, name };
+}
+
+async function listVersions(fs) {
+  const entries = await fs.list(P.VERSIONS);
+  return entries
+    .filter((e) => e.kind === 'file')
+    .map((e) => parseVersionFileName(e.name))
+    .filter(Boolean)
+    .sort((a, b) => a.revision - b.revision || (a.stamp < b.stamp ? -1 : 1));
+}
+
+// 開啟：current.json→版本檔→驗SHA-256與資料結構版本→驗稽核雜湊鏈。不符不自動改用其他版本。
+async function openFolder(fs) {
+  const meta = await readMeta(fs);
+  const readonly = [];
+  if (typeof meta.schema_version === 'number' && meta.schema_version > SCHEMA_VERSION) {
+    readonly.push(`資料夾資料結構版本 ${meta.schema_version} 新於本程式（${SCHEMA_VERSION}），只可唯讀，請更新程式`);
+  }
+  let current;
+  try {
+    current = await readCurrent(fs);
+  } catch (e) {
+    return { ok: false, meta, errors: [{ code: e.code || 'CURRENT_BAD', message: e.message }], versions: await listVersions(fs) };
+  }
+  const v = await loadVersion(fs, current.file, { meta, expect: current });
+  if (!v.ok) {
+    return { ok: false, meta, current, errors: v.errors, versions: await listVersions(fs) };
+  }
+  return {
+    ok: true, meta, current, header: v.header, data: v.data, audit: v.audit,
+    readonly: readonly.concat(v.readonly),
+  };
+}
+
+// 檢查各版本檔：檔名雜湊、與下一版之prev_sha256連續
+async function verifyHistory(fs) {
+  const list = await listVersions(fs);
+  const out = [];
+  let current = null;
+  try { current = await readCurrent(fs); } catch (e) { current = null; }
+  const byRev = new Map();
+  for (const item of list) {
+    const r = await fs.read(`${P.VERSIONS}/${item.name}`);
+    const row = { ...item, ok: false, notes: [] };
+    if (!r) { row.notes.push('無法讀取'); out.push(row); continue; }
+    row.sha256 = await sha256Text(r.text);
+    row.size = r.size;
+    if (row.sha256.slice(0, 8) !== item.sha8) row.notes.push('雜湊與檔名不符');
+    try {
+      const f = JSON.parse(r.text);
+      row.header = f.header;
+      const chain = await verifyChain(f.audit);
+      if (!chain.ok) row.notes.push('稽核雜湊鏈中斷：' + chain.reason);
+    } catch (e) {
+      row.notes.push('JSON格式錯誤');
+    }
+    row.isCurrent = !!current && current.file === item.name;
+    if (row.isCurrent && current.sha256 !== row.sha256) row.notes.push('與current.json記載雜湊不符');
+    row.ok = row.notes.length === 0;
+    if (!byRev.has(item.revision)) byRev.set(item.revision, []);
+    byRev.get(item.revision).push(row);
+    out.push(row);
+  }
+  // 前一版連結：本版 header.prev_sha256 須為某個 revision-1 版本檔之雜湊
+  for (const row of out) {
+    if (!row.header || row.header.prev_revision === null || row.header.prev_revision === undefined) continue;
+    const prevs = byRev.get(row.header.prev_revision) || [];
+    const linked = prevs.find((p) => p.sha256 === row.header.prev_sha256);
+    if (!linked) { row.notes.push(`找不到前一版（${revLabel(row.header.prev_revision)}）或其雜湊不符`); row.ok = false; }
+  }
+  // 未被引用之版本檔（儲存中斷之殘留）
+  const referenced = new Set();
+  if (current) {
+    referenced.add(current.file);
+    let cur = out.find((r) => r.name === current.file);
+    while (cur && cur.header && cur.header.prev_sha256) {
+      const prev = out.find((r) => r.sha256 === cur.header.prev_sha256);
+      if (!prev) break;
+      referenced.add(prev.name);
+      cur = prev;
+    }
+  }
+  for (const row of out) row.inChain = referenced.has(row.name);
+  return out;
+}
+
+// 驗證本次新增引用之附件／主檔檔案存在且雜湊相符（第4.5節步驟2）
+async function verifyRefs(fs, refs) {
+  for (const ref of refs || []) {
+    assertPath(ref.path);
+    const r = await fs.readBytes(ref.path);
+    if (!r) throw new SpecError('REF_MISSING', `引用之檔案不存在：${ref.path}${ref.label ? '（' + ref.label + '）' : ''}`);
+    const sha = await sha256Bytes(r.bytes);
+    if (sha !== ref.sha256) throw new SpecError('REF_HASH', `引用之檔案雜湊不符：${ref.path}${ref.label ? '（' + ref.label + '）' : ''}`);
+  }
+}
+
+// 儲存協定（第4.5節）。任何步驟失敗即整體失敗，不改目前版本。
+// 回傳 {status:'saved'|'already', current, header, name}；失敗擲 SpecError（code見下）。
+//   TOKEN_LOST：編輯牌已不在本工作階段；CONFLICT：資料夾已被其他分頁或程式變更；
+//   OVERWRITTEN：存後重讀current.json發現已被他人覆蓋（版本檔已建立，detail.name可找回）。
+async function saveVersion(fs, { clock, session, meta, base, data, auditBase, auditDrafts, saveId, refs, summary }) {
+  if (!saveId) throw new SpecError('NO_SAVE_ID', '缺save_id');
+  // 重試：若 current.json 的 save_id 已是本次，視為已完成
+  const cur0 = await readCurrent(fs);
+  if (cur0.save_id === saveId) {
+    return { status: 'already', current: cur0, name: cur0.file };
+  }
+  // 步驟1：編輯牌仍為本工作階段持有；revision 與開啟時相同
+  const tr = await fs.read(P.TOKEN);
+  let tok = null;
+  try { tok = tr ? JSON.parse(tr.text) : null; } catch (e) { tok = null; }
+  if (!tok || tok.state !== 'held' || tok.session_id !== session.id) {
+    throw new SpecError('TOKEN_LOST', '編輯牌已不在本工作階段（可能已被強制收回或逾時由他人取得），拒絕儲存；未儲存變更已保留為復原草稿', { token: tok });
+  }
+  if (cur0.revision !== base.revision || cur0.sha256 !== base.sha256) {
+    throw new SpecError('CONFLICT', '資料夾已被其他分頁或程式變更，請重新載入核對', { current: cur0 });
+  }
+  // 步驟2：引用檔案；稽核雜湊鏈連續
+  await verifyRefs(fs, refs);
+  const now = clock.now();
+  const audit = await sealEvents(auditBase, auditDrafts.map((d) => ({ ...d, app_version: APP_VERSION })));
+  if (!isPrefixOf(auditBase, audit)) throw new SpecError('AUDIT_CHAIN', '稽核紀錄不連續，拒絕儲存');
+  const chain = await verifyChain(audit);
+  if (!chain.ok) throw new SpecError('AUDIT_CHAIN', '稽核雜湊鏈驗證失敗：' + chain.reason);
+  // 步驟3：寫入新版本檔並讀回比對
+  const revision = base.revision + 1;
+  const v = await writeVersionFile(fs, {
+    folderId: meta.folder_id, revision, prev: base, now, session, saveId, data, audit, summary,
+  });
+  // 步驟4：寫入新 current.json
+  const rec = currentRecord({ revision, ...v });
+  await fs.write(P.CURRENT, json(rec));
+  // 步驟5：重讀 current.json，save_id 須為本次
+  const cur1 = await readCurrent(fs);
+  if (cur1.save_id !== saveId) {
+    throw new SpecError('OVERWRITTEN', `目前版本已被其他人覆蓋。本次版本檔：${v.name}（可由儲存歷程找回）`, { name: v.name, current: cur1 });
+  }
+  return { status: 'saved', current: cur1, header: v.header, name: v.name, audit };
+}
+
+// 資料夾寫入測試（第4.3節）：建立並刪除暫存測試檔
+async function writeTest(fs, clock) {
+  const path = `control/_writetest-${newId()}.tmp`;
+  const text = 'specdrug write test ' + isoUtc(clock.now());
+  const before = clock.now();
+  try {
+    await fs.create(path, text);
+    const r = await fs.read(path);
+    if (!r || r.text !== text) throw new SpecError('WRITE_TEST', '寫入後讀回內容不符');
+    await fs.remove(path);
+    return { ok: true, localAt: before, lastModified: r.lastModified };
+  } catch (e) {
+    try { await fs.remove(path); } catch (e2) { /* 忽略 */ }
+    return { ok: false, error: e };
+  }
+}
+
+return { FOLDER_FORMAT, DATA_FORMAT, releasedToken, inspectFolder, initFolder, readMeta, readCurrent, loadVersion, listVersions, openFolder, verifyHistory, verifyRefs, saveVersion, writeTest };
+})();
+
+// ---- core/token.js ----
+const __m_core_token_js = (function () {
+// 編輯牌（第4.6節）：control/editing.json；不刪檔，只改寫內容。
+// 注意：這是程式之間的約定，不是檔案伺服器仲裁的獨占鎖（第4.6節第15、16點）。
+const { P } = __m_core_paths_js;
+const { APP_VERSION } = __m_core_version_js;
+const { isoUtc } = __m_core_util_js;
+const TOKEN_FORMAT = 'specdrug-editing';
+
+class EditToken {
+  // settings: {heartbeatMs, staleMs, confirmMs, skewMs}
+  constructor({ fs, clock, sleep, session, settings }) {
+    this.fs = fs;
+    this.clock = clock;
+    this.sleep = sleep;
+    this.session = session;
+    this.settings = { heartbeatMs: 30000, staleMs: 300000, confirmMs: 3000, skewMs: 120000, ...(settings || {}) };
+    this.serverOffset = null; // 檔案時間－本機時間，由自己寫入的檔案量得
+    this.observe = null;
+    this.seq = 0;
+  }
+
+  holderInfo() {
+    return { user: this.session.user, pc: this.session.pc };
+  }
+
+  noteOwnWrite(localMs, fileMs) {
+    if (typeof fileMs === 'number' && fileMs > 0) this.serverOffset = fileMs - localMs;
+  }
+
+  async read() {
+    const r = await this.fs.read(P.TOKEN);
+    if (!r) return { token: null, lastModified: null };
+    let token = null;
+    try { token = JSON.parse(r.text); } catch (e) { token = null; }
+    if (token && token.format !== TOKEN_FORMAT) token = null;
+    return { token, lastModified: r.lastModified };
+  }
+
+  async write(token) {
+    const local = this.clock.now();
+    await this.fs.write(P.TOKEN, JSON.stringify(token, null, 2) + '\n');
+    const back = await this.fs.read(P.TOKEN);
+    if (back) this.noteOwnWrite(local, back.lastModified);
+  }
+
+  // 判定牌的狀態：free（已歸還／無檔）、mine、held（他人持有且程式仍開著）、
+  // stale（他人持有但逾時無心跳，視同已歸還）、checking（時間異常，以序號觀察中）
+  assess({ token, lastModified }) {
+    if (!token || token.state !== 'held') return { status: 'free', token };
+    if (token.session_id === this.session.id) return { status: 'mine', token };
+    const now = this.clock.now();
+    const { staleMs, skewMs } = this.settings;
+    const future = typeof lastModified === 'number' && lastModified - now > skewMs;
+    const offsetBad = this.serverOffset !== null && Math.abs(this.serverOffset) > skewMs;
+    if (typeof lastModified === 'number' && !future && !offsetBad) {
+      this.observe = null;
+      const age = now - lastModified;
+      return { status: age > staleMs ? 'stale' : 'held', token, lastSeen: lastModified, age };
+    }
+    // 時間異常：以本機連續觀察心跳序號是否變動判定
+    const key = token.session_id + ':' + token.heartbeat_seq;
+    if (!this.observe || this.observe.key !== key) {
+      this.observe = { key, since: now };
+      return { status: 'checking', token, reason: 'clock' };
+    }
+    const quiet = now - this.observe.since;
+    if (quiet > staleMs) return { status: 'stale', token, age: quiet, reason: 'clock' };
+    return { status: 'checking', token, reason: 'clock', quietMs: quiet };
+  }
+
+  async status() {
+    return this.assess(await this.read());
+  }
+
+  // 取牌：已歸還／逾時→寫入自己，等confirmMs後重讀；仍是自己才成功
+  // closedLocal(session_id)：持牌者為本瀏覽器已關閉之分頁（由 navigator.locks 確認）時回傳 true
+  async acquire({ baseRevision, closedLocal }) {
+    let a = this.assess(await this.read());
+    if (a.status === 'mine') return { ok: true, status: 'mine' };
+    if ((a.status === 'held' || a.status === 'checking') && closedLocal && closedLocal(a.token.session_id)) {
+      a = { ...a, status: 'stale', reason: 'local_closed' };
+    }
+    if (a.status === 'held' || a.status === 'checking') return { ok: false, ...a };
+    const now = this.clock.now();
+    const previous = a.status === 'stale' ? a.token : null;
+    const token = {
+      format: TOKEN_FORMAT,
+      state: 'held',
+      holder: this.holderInfo(),
+      session_id: this.session.id,
+      acquired_at: isoUtc(now),
+      heartbeat_seq: 0,
+      heartbeat_at: isoUtc(now),
+      app_version: APP_VERSION,
+      base_revision: baseRevision,
+      last_event: previous
+        ? { type: a.reason === 'local_closed' ? 'local_closed' : 'expired', at: isoUtc(now), by: this.holderInfo(), prev_holder: previous.holder, prev_session_id: previous.session_id, prev_heartbeat_at: previous.heartbeat_at }
+        : ((a.token && a.token.last_event) || null),
+    };
+    await this.write(token);
+    await this.sleep(this.settings.confirmMs);
+    const again = await this.read();
+    if (!again.token || again.token.state !== 'held' || again.token.session_id !== this.session.id) {
+      return { ok: false, status: 'race', token: again.token };
+    }
+    this.seq = 0;
+    return { ok: true, status: previous ? (a.reason === 'local_closed' ? 'took_local' : 'took_stale') : 'acquired', previous };
+  }
+
+  // 心跳：牌不是自己的→lost；寫入失敗擲錯（呼叫端應停止存檔，狀態不明）
+  async heartbeat() {
+    const r = await this.read();
+    if (!r.token || r.token.state !== 'held' || r.token.session_id !== this.session.id) {
+      return { status: 'lost', token: r.token };
+    }
+    this.seq = (r.token.heartbeat_seq || 0) + 1;
+    await this.write({ ...r.token, heartbeat_seq: this.seq, heartbeat_at: isoUtc(this.clock.now()) });
+    return { status: 'ok', seq: this.seq };
+  }
+
+  async release() {
+    const r = await this.read();
+    if (!r.token || r.token.state !== 'held' || r.token.session_id !== this.session.id) return false;
+    const now = this.clock.now();
+    await this.write({
+      ...r.token,
+      state: 'released',
+      released_at: isoUtc(now),
+      last_event: { type: 'released', at: isoUtc(now), by: this.holderInfo() },
+    });
+    return true;
+  }
+
+  // 強制收回：關鍵詞由呼叫端驗證後才呼叫
+  async forceTakeover({ reason, baseRevision }) {
+    const before = await this.read();
+    const prev = before.token && before.token.state === 'held' ? before.token : null;
+    const now = this.clock.now();
+    const token = {
+      format: TOKEN_FORMAT,
+      state: 'held',
+      holder: this.holderInfo(),
+      session_id: this.session.id,
+      acquired_at: isoUtc(now),
+      heartbeat_seq: 0,
+      heartbeat_at: isoUtc(now),
+      app_version: APP_VERSION,
+      base_revision: baseRevision,
+      last_event: {
+        type: 'forced', at: isoUtc(now), by: this.holderInfo(), reason,
+        prev_holder: prev ? prev.holder : null, prev_session_id: prev ? prev.session_id : null,
+        prev_acquired_at: prev ? prev.acquired_at : null,
+      },
+    };
+    await this.write(token);
+    await this.sleep(this.settings.confirmMs);
+    const again = await this.read();
+    if (!again.token || again.token.session_id !== this.session.id) {
+      return { ok: false, status: 'race', token: again.token };
+    }
+    this.seq = 0;
+    return { ok: true, status: 'forced', previous: prev, token };
+  }
+}
+
+return { TOKEN_FORMAT, EditToken };
+})();
+
+// ---- core/session.js ----
+const __m_core_session_js = (function () {
+// 工作階段：查詢／編輯模式、編輯牌、儲存、復原草稿（第4.5、4.6節）。不碰DOM。
+const { SpecError, errText } = __m_core_errors_js;
+const { openFolder, initFolder, readCurrent, saveVersion, writeTest, verifyHistory, loadVersion } = __m_core_folder_js;
+const { EditToken } = __m_core_token_js;
+const { KeywordGuard, verifyKeyword, changeKeyword, writeKeyword, readKeywordRecord } = __m_core_keyword_js;
+const { effectiveSettings, validateSettingsPatch } = __m_core_dataset_js;
+const { deepClone, newId, isoUtc } = __m_core_util_js;
+const { APP_VERSION } = __m_core_version_js;
+const CONTROL_ENTITIES = new Set(['editing_token', 'keyword']);
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+class AppSession {
+  // profile：{user, pc}；caps：selfCheck()結果；draftStore：{get,put,delete}；locks：{tryHold(name)}
+  // localSessions：本瀏覽器曾持牌之工作階段id紀錄 {has(id), add(id)}（與 locks 併用）
+  constructor({ fs, clock, sleep, profile, sessionId, draftStore, locks, caps, keywordIterations, tokenOverrides, localSessions }) {
+    this.fs = fs;
+    this.clock = clock || { now: () => Date.now() };
+    this.sleep = sleep || defaultSleep;
+    this.session = { id: sessionId || newId(), user: (profile && profile.user) || '', pc: (profile && profile.pc) || '' };
+    this.draftStore = draftStore || null;
+    this.locks = locks || null;
+    this.caps = caps || { canEdit: true, readonlyReasons: [] };
+    this.keywordIterations = keywordIterations;
+    this.tokenOverrides = tokenOverrides || {};
+    this.localSessions = localSessions || null;
+    this.mode = 'closed';
+    this.listeners = new Set();
+    this._resetWork();
+  }
+
+  _resetWork() {
+    this.dirty = 0;
+    this.pending = [];
+    this.refs = [];
+    this.saveAttempt = null;
+    this.tokenUncertain = false;
+  }
+
+  onChange(fn) {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  emit() {
+    for (const fn of this.listeners) {
+      try { fn(this); } catch (e) { /* 介面錯誤不影響資料 */ }
+    }
+  }
+
+  async create(keyword) {
+    await initFolder(this.fs, { clock: this.clock, session: this.session, keyword, keywordIterations: this.keywordIterations });
+    return this.open();
+  }
+
+  async open() {
+    const res = await openFolder(this.fs);
+    this.lastOpen = res;
+    if (!res.ok) {
+      this.mode = 'error';
+      this.meta = res.meta;
+      this.openErrors = res.errors;
+      this.emit();
+      return res;
+    }
+    this._load(res);
+    const wt = await writeTest(this.fs, this.clock);
+    this.canWrite = wt.ok;
+    this.writeError = wt.ok ? null : errText(wt.error);
+    this.token = new EditToken({ fs: this.fs, clock: this.clock, sleep: this.sleep, session: this.session, settings: this._tokenSettings() });
+    if (wt.ok) this.token.noteOwnWrite(wt.localAt, wt.lastModified);
+    const s = effectiveSettings(this.committed.data);
+    this.guard = new KeywordGuard({ clock: this.clock, maxFail: s.keyword_max_fail, lockMs: s.keyword_lock_sec * 1000 });
+    this.mode = 'query';
+    this.newerAvailable = false;
+    this.lostInfo = null;
+    await this.refreshTokenStatus();
+    this.emit();
+    return res;
+  }
+
+  _load(res) {
+    this.meta = res.meta;
+    this.current = res.current;
+    this.header = res.header;
+    this.readonly = res.readonly || [];
+    this.committed = { data: res.data, audit: res.audit };
+    this.work = deepClone(res.data);
+    this._resetWork();
+  }
+
+  _tokenSettings() {
+    const s = effectiveSettings(this.committed.data);
+    return { heartbeatMs: s.heartbeat_sec * 1000, staleMs: s.stale_min * 60000, ...this.tokenOverrides };
+  }
+
+  get settings() {
+    return effectiveSettings(this.work || (this.committed && this.committed.data));
+  }
+
+  get unsavedCount() {
+    return this.dirty;
+  }
+
+  get hasUnsaved() {
+    return this.dirty > 0 || this.pending.length > 0;
+  }
+
+  editBlockers() {
+    const r = [];
+    if (this.caps && this.caps.canEdit === false) r.push(...(this.caps.readonlyReasons || ['瀏覽器能力不足']));
+    if (this.readonly && this.readonly.length) r.push(...this.readonly);
+    if (!this.canWrite) r.push(`資料夾無寫入權（${this.writeError || '寫入測試失敗'}），只提供查詢模式`);
+    return r;
+  }
+
+  async refreshTokenStatus() {
+    if (!this.token) return null;
+    try {
+      this.tokenStatus = await this.token.status();
+    } catch (e) {
+      this.tokenStatus = { status: 'unknown', error: errText(e) };
+    }
+    return this.tokenStatus;
+  }
+
+  _event(entity, action, diff, reason, entityId, opId) {
+    return {
+      id: newId(), at: isoUtc(this.clock.now()), user: this.session.user, pc: this.session.pc,
+      app_version: APP_VERSION, entity, entity_id: entityId || null, action, diff: diff === undefined ? null : diff,
+      reason: reason || null, op_id: opId || null,
+    };
+  }
+
+  async _tabLock() {
+    if (this._tabRelease) return true;
+    if (!this.locks) return true;
+    const rel = await this.locks.tryHold('specdrug-edit-' + this.meta.folder_id);
+    if (!rel) return false;
+    this._tabRelease = rel;
+    return true;
+  }
+
+  _rememberLocal() {
+    if (this.localSessions) {
+      try { this.localSessions.add(this.session.id); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  _tabUnlock() {
+    if (this._tabRelease) {
+      try { this._tabRelease(); } catch (e) { /* 忽略 */ }
+      this._tabRelease = null;
+    }
+  }
+
+  _toQuery() {
+    this.mode = 'query';
+    this._tabUnlock();
+  }
+
+  async _viewIsCurrent() {
+    const cur = await readCurrent(this.fs);
+    return { same: cur.revision === this.current.revision && cur.sha256 === this.current.sha256, current: cur };
+  }
+
+  async startEdit() {
+    if (this.mode === 'edit') return { ok: true, status: 'mine' };
+    if (this.mode !== 'query') return { ok: false, status: 'closed' };
+    const blockers = this.editBlockers();
+    if (blockers.length) return { ok: false, status: 'blocked', reasons: blockers };
+    const v = await this._viewIsCurrent();
+    if (!v.same) {
+      this.newerAvailable = true;
+      this.emit();
+      return { ok: false, status: 'stale_view', current: v.current };
+    }
+    if (!(await this._tabLock())) return { ok: false, status: 'tab_locked' };
+    // 已取得本瀏覽器之分頁鎖：若牌記載為本瀏覽器其他分頁，該分頁必已關閉（不在編輯中）
+    const closedLocal = this.locks && this.localSessions
+      ? (id) => id !== this.session.id && this.localSessions.has(id)
+      : null;
+    let r;
+    try {
+      r = await this.token.acquire({ baseRevision: this.current.revision, closedLocal });
+    } catch (e) {
+      this._tabUnlock();
+      return { ok: false, status: 'error', error: errText(e) };
+    }
+    if (!r.ok) {
+      this._tabUnlock();
+      this.tokenStatus = r;
+      this.emit();
+      return r;
+    }
+    this.mode = 'edit';
+    this.tokenUncertain = false;
+    this.lostInfo = null;
+    this._rememberLocal();
+    if (r.previous) {
+      this.pending.push(this._event('editing_token', r.status === 'took_local' ? '取得編輯牌（本瀏覽器前一分頁已關閉）' : '逾時取得編輯牌',
+        { prev_holder: r.previous.holder, prev_session_id: r.previous.session_id, prev_heartbeat_at: r.previous.heartbeat_at }));
+    }
+    await this.refreshTokenStatus();
+    this.emit();
+    return r;
+  }
+
+  async heartbeatTick() {
+    if (this.mode !== 'edit') return { status: 'idle' };
+    let r;
+    try {
+      r = await this.token.heartbeat();
+    } catch (e) {
+      this.tokenUncertain = true;
+      this.emit();
+      return { status: 'uncertain', error: errText(e) };
+    }
+    if (r.status === 'lost') {
+      await this._persistDraft(true);
+      this._toQuery();
+      this.lostInfo = { token: r.token };
+      this.tokenStatus = this.token.assess({ token: r.token, lastModified: this.clock.now() });
+      this.emit();
+      return { status: 'lost', token: r.token };
+    }
+    this.tokenUncertain = false;
+    this.emit();
+    return { status: 'ok' };
+  }
+
+  // 修改工作副本：mutator(副本) 直接修改副本；event：{entity, action, diff, reason, entity_id, op_id}
+  async change(mutator, event) {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '目前為查詢模式，請先取得編輯牌');
+    const next = deepClone(this.work);
+    mutator(next);
+    this.work = next;
+    if (event) this.pending.push(this._event(event.entity, event.action, event.diff, event.reason, event.entity_id, event.op_id));
+    this.dirty += 1;
+    await this._persistDraft();
+    this.emit();
+  }
+
+  async updateSettings(patch, reason) {
+    const { next, diff } = validateSettingsPatch(this.work.settings, patch);
+    if (!Object.keys(diff).length) return { changed: false };
+    await this.change((d) => { d.settings = next; }, { entity: 'settings', action: '修改設定', diff, reason });
+    return { changed: true, diff };
+  }
+
+  async save() {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '目前為查詢模式，無法儲存');
+    if (this.tokenUncertain) throw new SpecError('TOKEN_UNCERTAIN', '編輯牌狀態不明（心跳寫入失敗），暫停存檔；恢復連線後將自動重新確認');
+    if (!this.hasUnsaved) return { status: 'nothing' };
+    // 同一 save_id 保留到確定成功；上次送出內容（結果不明）記於 prevSent
+    if (!this.saveAttempt) this.saveAttempt = { saveId: newId(), sent: null };
+    const attempt = this.saveAttempt;
+    const prevSent = attempt.sent;
+    attempt.sent = { pendingCount: this.pending.length, dirty: this.dirty };
+    const summary = summarize(this.pending, this.dirty);
+    let res;
+    try {
+      res = await saveVersion(this.fs, {
+        clock: this.clock, session: this.session, meta: this.meta, base: this.current,
+        data: this.work, auditBase: this.committed.audit, auditDrafts: this.pending,
+        saveId: attempt.saveId, refs: this.refs, summary,
+      });
+    } catch (e) {
+      await this._persistDraft(true);
+      if (e && e.code === 'TOKEN_LOST') {
+        this._toQuery();
+        this.lostInfo = { token: e.detail && e.detail.token };
+      }
+      if (e && e.code === 'CONFLICT') this.newerAvailable = true;
+      this.emit();
+      throw e;
+    }
+    if (res.status === 'already') {
+      // 先前一次儲存已完成（畫面未得結果）：以資料夾目前版本為基準，保留其後之變更
+      const v = await loadVersion(this.fs, res.current.file, { meta: this.meta, expect: res.current });
+      if (!v.ok) throw new SpecError('VERSION_BAD', '已完成之版本檔驗證失敗：' + v.errors.map((x) => x.message).join('；'));
+      this.current = res.current;
+      this.header = v.header;
+      this.committed = { data: v.data, audit: v.audit };
+      const done = prevSent || attempt.sent;
+      this.pending = this.pending.slice(done.pendingCount);
+      this.dirty = Math.max(0, this.dirty - done.dirty);
+      this.saveAttempt = null;
+      if (!this.hasUnsaved) {
+        this.work = deepClone(v.data);
+        await this._deleteDraft();
+      } else {
+        await this._persistDraft(true);
+      }
+      this.emit();
+      return { status: 'already', current: res.current, name: res.name };
+    }
+    this.current = res.current;
+    this.header = res.header;
+    this.committed = { data: deepClone(this.work), audit: res.audit };
+    this.dirty = 0;
+    this.pending = [];
+    this.refs = [];
+    this.saveAttempt = null;
+    await this._deleteDraft();
+    this.emit();
+    return res;
+  }
+
+  // choice：'save'｜'draft'｜'discard'
+  async endEdit(choice) {
+    if (this.mode !== 'edit') return { ok: true, status: 'not_editing' };
+    const dataDirty = this.dirty > 0;
+    if (dataDirty) {
+      if (!choice) return { ok: false, status: 'need_choice' };
+      if (choice === 'save') {
+        await this.save();
+      } else if (choice === 'draft') {
+        await this._persistDraft(true);
+      } else if (choice === 'discard') {
+        this.work = deepClone(this.committed.data);
+        this.dirty = 0;
+        this.refs = [];
+        this.pending = this.pending.filter((e) => CONTROL_ENTITIES.has(e.entity));
+        this.saveAttempt = null;
+        await this._deleteDraft();
+      } else {
+        throw new SpecError('BAD_CHOICE', '未知的選項');
+      }
+    }
+    // 只剩編輯牌／關鍵詞稽核時，自動寫入（第4.6節第9點：收回紀錄寫入稽核）
+    if (!this.dirty && this.pending.length) {
+      await this.save();
+    }
+    let releaseError = null;
+    try {
+      await this.token.release();
+    } catch (e) {
+      releaseError = errText(e);
+    }
+    this._toQuery();
+    await this.refreshTokenStatus();
+    this.emit();
+    return { ok: true, status: 'released', releaseError, keptDraft: choice === 'draft' };
+  }
+
+  async forceTakeover(keyword, reason) {
+    if (this.mode === 'edit') return { ok: true, status: 'mine' };
+    if (this.mode !== 'query') return { ok: false, status: 'closed' };
+    const blockers = this.editBlockers();
+    if (blockers.length) return { ok: false, status: 'blocked', reasons: blockers };
+    const st = this.guard.status();
+    if (st.locked) return { ok: false, status: 'locked', remainMs: st.remainMs };
+    if (!reason || !String(reason).trim()) return { ok: false, status: 'need_reason' };
+    let ok;
+    try {
+      ok = await verifyKeyword(this.fs, keyword);
+    } catch (e) {
+      if (e.code === 'KEYWORD_MISSING') return { ok: false, status: 'no_keyword', message: e.message };
+      throw e;
+    }
+    const after = this.guard.record(ok);
+    if (!ok) return { ok: false, status: after.locked ? 'locked' : 'wrong', ...after };
+    const v = await this._viewIsCurrent();
+    if (!v.same) {
+      this.newerAvailable = true;
+      this.emit();
+      return { ok: false, status: 'stale_view', current: v.current };
+    }
+    if (!(await this._tabLock())) return { ok: false, status: 'tab_locked' };
+    const r = await this.token.forceTakeover({ reason: String(reason).trim(), baseRevision: this.current.revision });
+    if (!r.ok) {
+      this._tabUnlock();
+      this.emit();
+      return r;
+    }
+    this.mode = 'edit';
+    this.tokenUncertain = false;
+    this.lostInfo = null;
+    this._rememberLocal();
+    const p = r.previous;
+    this.pending.push(this._event('editing_token', '強制收回編輯牌', {
+      prev_holder: p ? p.holder : null, prev_session_id: p ? p.session_id : null, prev_acquired_at: p ? p.acquired_at : null,
+    }, String(reason).trim()));
+    await this.refreshTokenStatus();
+    this.emit();
+    return r;
+  }
+
+  async changeKeyword(oldKeyword, newKeyword) {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '修改關鍵詞須先取得編輯牌');
+    await changeKeyword(this.fs, oldKeyword, newKeyword, { now: this.clock.now(), by: { user: this.session.user, pc: this.session.pc }, iterations: this.keywordIterations });
+    this.pending.push(this._event('keyword', '修改關鍵詞', null, null));
+    await this._persistDraft(true);
+    this.emit();
+  }
+
+  async keywordMissing() {
+    return !(await readKeywordRecord(this.fs));
+  }
+
+  // Q16（暫採）：keyword.json 被刪除後，持牌者重新設定，記錄稽核
+  async resetMissingKeyword(newKeyword) {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '設定關鍵詞須先取得編輯牌');
+    if (!(await this.keywordMissing())) throw new SpecError('KEYWORD_EXISTS', '關鍵詞已存在；修改須輸入原關鍵詞');
+    await writeKeyword(this.fs, newKeyword, { now: this.clock.now(), by: { user: this.session.user, pc: this.session.pc }, iterations: this.keywordIterations });
+    this.pending.push(this._event('keyword', '重新設定關鍵詞（原關鍵詞檔不存在）', null, null));
+    await this._persistDraft(true);
+    this.emit();
+  }
+
+  async checkForUpdate() {
+    if (this.mode !== 'query' && this.mode !== 'edit') return { newer: false };
+    const v = await this._viewIsCurrent();
+    this.newerAvailable = !v.same;
+    await this.refreshTokenStatus();
+    this.emit();
+    return { newer: !v.same, current: v.current };
+  }
+
+  async reload() {
+    if (this.mode === 'edit' && this.hasUnsaved) {
+      throw new SpecError('UNSAVED', '有未儲存變更，請先儲存或結束編輯');
+    }
+    const wasEdit = this.mode === 'edit';
+    const res = await openFolder(this.fs);
+    if (!res.ok) {
+      this.mode = wasEdit ? this.mode : 'error';
+      this.openErrors = res.errors;
+      this.emit();
+      return res;
+    }
+    this._load(res);
+    this.newerAvailable = false;
+    if (wasEdit) this.token.settings = { ...this.token.settings, ...this._tokenSettings() };
+    await this.refreshTokenStatus();
+    this.emit();
+    return res;
+  }
+
+  async history() {
+    return verifyHistory(this.fs);
+  }
+
+  // ---------- 復原草稿（IndexedDB）----------
+  draftKey() {
+    return 'draft:' + this.meta.folder_id;
+  }
+
+  async _persistDraft(force) {
+    if (!this.draftStore || !this.meta) return;
+    if (!force && !this.hasUnsaved) return;
+    if (!this.hasUnsaved) return;
+    try {
+      await this.draftStore.put(this.draftKey(), {
+        format: 'specdrug-draft', folder_id: this.meta.folder_id,
+        base_revision: this.current.revision, base_sha256: this.current.sha256,
+        saved_at: isoUtc(this.clock.now()), user: this.session.user, pc: this.session.pc,
+        session_id: this.session.id, app_version: APP_VERSION,
+        dirty: this.dirty, pending: this.pending, refs: this.refs, data: this.work,
+      });
+      this.draftError = null;
+    } catch (e) {
+      this.draftError = errText(e);
+    }
+  }
+
+  async _deleteDraft() {
+    if (!this.draftStore || !this.meta) return;
+    try { await this.draftStore.delete(this.draftKey()); } catch (e) { this.draftError = errText(e); }
+  }
+
+  async recoveryCheck() {
+    if (!this.draftStore || !this.meta) return { kind: 'none' };
+    let d = null;
+    try { d = await this.draftStore.get(this.draftKey()); } catch (e) { return { kind: 'error', error: errText(e) }; }
+    if (!d) return { kind: 'none' };
+    // 以資料夾目前版本比對（非本分頁開啟時之版本）
+    let cur = this.current;
+    try { cur = await readCurrent(this.fs); } catch (e) { /* 讀不到時以開啟時版本比對 */ }
+    const same = d.base_revision === cur.revision && d.base_sha256 === cur.sha256 &&
+      cur.revision === this.current.revision && cur.sha256 === this.current.sha256;
+    return { kind: same ? 'same_base' : 'diff_base', draft: d };
+  }
+
+  // 只在基準revision相同時套用；須先取得編輯牌
+  async applyDraft() {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '復原草稿須先取得編輯牌');
+    const rc = await this.recoveryCheck();
+    if (rc.kind !== 'same_base') throw new SpecError('DRAFT_BASE', '復原草稿之基準版本與目前版本不同，不自動套用；請另存為復原檔核對');
+    const d = rc.draft;
+    this.work = d.data;
+    this.pending = (d.pending || []).concat(this.pending.filter((e) => CONTROL_ENTITIES.has(e.entity)));
+    this.dirty = d.dirty || 1;
+    this.refs = d.refs || [];
+    await this._persistDraft(true);
+    this.emit();
+    return { applied: true };
+  }
+
+  async discardDraft() {
+    await this._deleteDraft();
+  }
+
+  // 關閉分頁：盡力還牌（瀏覽器不保證完成，另以心跳逾時判定）
+  async closing() {
+    if (this.mode !== 'edit') return;
+    await this._persistDraft();
+    try { await this.token.release(); } catch (e) { /* 不保證 */ }
+    this._tabUnlock();
+  }
+
+  statusInfo() {
+    return {
+      mode: this.mode,
+      folderId: this.meta && this.meta.folder_id,
+      revision: this.current && this.current.revision,
+      savedAt: this.current && this.current.saved_at,
+      savedBy: this.current && this.current.saved_by,
+      unsaved: this.dirty,
+      pendingAudit: this.pending.length,
+      newerAvailable: !!this.newerAvailable,
+      token: this.tokenStatus,
+      tokenUncertain: this.tokenUncertain,
+      lostInfo: this.lostInfo,
+    };
+  }
+}
+
+function summarize(pending, dirty) {
+  const names = [...new Set(pending.map((e) => e.action))];
+  const s = names.slice(0, 5).join('、') + (names.length > 5 ? `等${names.length}類` : '');
+  return s || (dirty ? `${dirty}項變更` : '');
+}
+
+return { defaultSleep, AppSession };
+})();
+
+// ---- adapters/browserfs.js ----
+const __m_adapters_browserfs_js = (function () {
+// 瀏覽器檔案系統存取（FileSystemDirectoryHandle）介面卡。介面同 memfs。
+const { SpecError } = __m_core_errors_js;
+const { assertPath, assertDir } = __m_core_paths_js;
+async function walk(root, parts, create) {
+  let d = root;
+  for (const p of parts) d = await d.getDirectoryHandle(p, { create });
+  return d;
+}
+
+function notFound(e) {
+  return e && (e.name === 'NotFoundError' || e.name === 'TypeMismatchError');
+}
+
+function browserFs(root) {
+  async function fileHandle(path, create) {
+    const parts = assertPath(path).split('/');
+    const name = parts.pop();
+    const dir = await walk(root, parts, create);
+    return dir.getFileHandle(name, { create });
+  }
+
+  async function writeAll(fh, data) {
+    const w = await fh.createWritable();
+    try {
+      await w.write(data);
+      await w.close();
+    } catch (e) {
+      try { await w.abort(); } catch (e2) { /* 忽略 */ }
+      throw e;
+    }
+  }
+
+  return {
+    name: root.name,
+    handle: root,
+    async read(path) {
+      try {
+        const f = await (await fileHandle(path, false)).getFile();
+        return { text: await f.text(), lastModified: f.lastModified, size: f.size };
+      } catch (e) {
+        if (notFound(e)) return null;
+        throw e;
+      }
+    },
+    async readBytes(path) {
+      try {
+        const f = await (await fileHandle(path, false)).getFile();
+        return { bytes: new Uint8Array(await f.arrayBuffer()), lastModified: f.lastModified, size: f.size };
+      } catch (e) {
+        if (notFound(e)) return null;
+        throw e;
+      }
+    },
+    async write(path, data) {
+      await writeAll(await fileHandle(path, true), data);
+    },
+    async create(path, data) {
+      let exists = true;
+      try { await fileHandle(path, false); } catch (e) { if (notFound(e)) exists = false; else throw e; }
+      if (exists) throw new SpecError('EXISTS', `檔案已存在，不覆寫：${path}`);
+      await writeAll(await fileHandle(path, true), data);
+    },
+    async remove(path) {
+      const parts = assertPath(path).split('/');
+      const name = parts.pop();
+      const dir = await walk(root, parts, false);
+      await dir.removeEntry(name);
+    },
+    async list(dirPath) {
+      assertDir(dirPath);
+      let dir;
+      try {
+        dir = dirPath ? await walk(root, dirPath.split('/'), false) : root;
+      } catch (e) {
+        if (notFound(e)) return [];
+        throw e;
+      }
+      const out = [];
+      for await (const [name, h] of dir.entries()) out.push({ name, kind: h.kind });
+      return out;
+    },
+  };
+}
+
+async function queryPermission(handle) {
+  if (!handle || typeof handle.queryPermission !== 'function') return 'granted';
+  return handle.queryPermission({ mode: 'readwrite' });
+}
+
+async function requestPermission(handle) {
+  if (!handle || typeof handle.requestPermission !== 'function') return 'granted';
+  return handle.requestPermission({ mode: 'readwrite' });
+}
+
+return { browserFs, queryPermission, requestPermission };
+})();
+
+// ---- adapters/idb.js ----
+const __m_adapters_idb_js = (function () {
+// IndexedDB 鍵值存放：只作資料夾授權記憶與當機復原草稿，不作正式資料。
+const DB_NAME = 'specdrug_v04';
+const STORE = 'kv';
+
+function open() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('IndexedDB 被其他分頁阻擋'));
+  });
+}
+
+function tx(mode, fn) {
+  return open().then((db) => new Promise((resolve, reject) => {
+    const t = db.transaction(STORE, mode);
+    const req = fn(t.objectStore(STORE));
+    let out;
+    if (req) req.onsuccess = () => { out = req.result; };
+    t.oncomplete = () => { db.close(); resolve(out); };
+    t.onerror = () => { db.close(); reject(t.error); };
+    t.onabort = () => { db.close(); reject(t.error || new Error('交易中止')); };
+  }));
+}
+
+const idbStore = {
+  get: (k) => tx('readonly', (s) => s.get(k)).then((v) => (v === undefined ? null : v)),
+  put: (k, v) => tx('readwrite', (s) => s.put(v, k)),
+  delete: (k) => tx('readwrite', (s) => s.delete(k)),
+};
+
+function browserLocks(nav) {
+  if (!nav.locks || typeof nav.locks.request !== 'function') return null;
+  return {
+    tryHold(name) {
+      return new Promise((resolve, reject) => {
+        nav.locks.request(name, { ifAvailable: true }, (lock) => {
+          if (!lock) { resolve(null); return null; }
+          return new Promise((release) => { resolve(() => release()); });
+        }).catch(reject);
+      });
+    },
+  };
+}
+
+// 本瀏覽器曾持牌之工作階段id（localStorage，保留最近20筆）；只用於判定同瀏覽器已關閉分頁
+const LOCAL_SESSIONS_KEY = 'specdrug.localSessions';
+const localSessions = {
+  _list() {
+    try { return JSON.parse(window.localStorage.getItem(LOCAL_SESSIONS_KEY) || '[]'); } catch (e) { return []; }
+  },
+  has(id) { return this._list().includes(id); },
+  add(id) {
+    const l = this._list().filter((x) => x !== id);
+    l.push(id);
+    try { window.localStorage.setItem(LOCAL_SESSIONS_KEY, JSON.stringify(l.slice(-20))); } catch (e) { /* 忽略 */ }
+  },
+};
+
+return { idbStore, browserLocks, localSessions };
+})();
+
+// ---- ui/main.js ----
+const __m_ui_main_js = (function () {
+// 介面：啟動、狀態列、編輯牌操作、儲存歷程、設定、關於。只呼叫業務模組函式改資料。
+const { h, clear, table, dialog, alertBox } = __m_ui_dom_js;
+const { saveTextAs } = __m_ui_files_js;
+const { selfCheck } = __m_core_selfcheck_js;
+const { AppSession } = __m_core_session_js;
+const { inspectFolder, loadVersion } = __m_core_folder_js;
+const { browserFs, queryPermission, requestPermission } = __m_adapters_browserfs_js;
+const { idbStore, browserLocks, localSessions } = __m_adapters_idb_js;
+const { errText } = __m_core_errors_js;
+const { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT } = __m_core_version_js;
+const { taipeiDisplay, taipeiHM, taipeiCompact, parseIso, revLabel } = __m_core_util_js;
+const { settingLabel, DEFAULT_SETTINGS } = __m_core_dataset_js;
+const { MIN_KEYWORD_LENGTH } = __m_core_keyword_js;
+const PROFILE_KEY = 'specdrug.profile';
+// 設計建議（待使用者同意）：同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。預設關閉。
+const LOCAL_CLOSED_RELEASE = false;
+const LAST_FOLDER_KEY = 'folder:last';
+
+const ui = {
+  check: null,
+  session: null,
+  folderName: '',
+  tab: 'home',
+  timers: { heartbeat: null, poll: null },
+  busy: false,
+};
+
+const $root = () => document.getElementById('app');
+
+// ---------- 使用者名稱（存於本機瀏覽器設定；非身分驗證） ----------
+function loadProfile() {
+  let p = { user: '', pc: '' };
+  try {
+    const raw = window.localStorage.getItem(PROFILE_KEY);
+    if (raw) p = { ...p, ...JSON.parse(raw) };
+  } catch (e) { /* 無法讀取時須重新輸入 */ }
+  const q = new URLSearchParams(window.location.search).get('user');
+  if (q && !p.user) p.user = q; // Q14：捷徑帶入，僅預填
+  return p;
+}
+
+function saveProfile(p) {
+  try { window.localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); } catch (e) { /* 忽略 */ }
+}
+
+// ---------- 共用 ----------
+function fmtIso(s) {
+  const ms = parseIso(s);
+  return ms === null ? '' : taipeiDisplay(ms);
+}
+
+function who(x) {
+  if (!x) return '（不明）';
+  return `${x.user || '（未填）'}（電腦：${x.pc || '未填'}）`;
+}
+
+async function guard(fn) {
+  if (ui.busy) return;
+  ui.busy = true;
+  render();
+  try {
+    await fn();
+  } catch (e) {
+    await alertBox('錯誤', errText(e), '下一步：請依訊息處理；未儲存變更已保留於本機復原草稿。');
+  } finally {
+    ui.busy = false;
+    render();
+  }
+}
+
+function btn(label, onClick, opts = {}) {
+  return h('button', { type: 'button', class: opts.primary ? 'primary' : '', disabled: ui.busy || opts.disabled, title: opts.title, text: label, on: { click: onClick } });
+}
+
+// ---------- 計時器（函式形式，不用字串） ----------
+function stopTimers() {
+  if (ui.timers.heartbeat) clearInterval(ui.timers.heartbeat);
+  if (ui.timers.poll) clearInterval(ui.timers.poll);
+  ui.timers.heartbeat = null;
+  ui.timers.poll = null;
+}
+
+function startTimers() {
+  stopTimers();
+  const s = ui.session;
+  if (!s || (s.mode !== 'query' && s.mode !== 'edit')) return;
+  const hbMs = s.settings.heartbeat_sec * 1000;
+  ui.timers.heartbeat = setInterval(onHeartbeat, hbMs);
+  ui.timers.poll = setInterval(onPoll, 60000);
+}
+
+async function onHeartbeat() {
+  const s = ui.session;
+  if (!s || s.mode !== 'edit') return;
+  const r = await s.heartbeatTick();
+  if (r.status === 'lost') {
+    const ev = r.token && r.token.last_event;
+    const lines = [];
+    if (ev && ev.type === 'forced') {
+      lines.push(`編輯牌已被 ${who(ev.by)} 於 ${fmtIso(ev.at)} 強制收回，原因：${ev.reason || '（未填）'}。`);
+    } else {
+      lines.push(`編輯牌已不在本分頁（目前持牌：${who(r.token && r.token.holder)}）。`);
+    }
+    lines.push('你未儲存的變更已保留為復原草稿。已改為查詢模式。');
+    render();
+    await alertBox('編輯牌已被收回', ...lines);
+  }
+  render();
+}
+
+async function onPoll() {
+  const s = ui.session;
+  if (!s) return;
+  try {
+    await s.checkForUpdate();
+  } catch (e) { /* 讀取失敗下次再試 */ }
+  render();
+}
+
+// ---------- 資料夾 ----------
+async function rememberFolder(handle) {
+  if (!ui.check.caps.idb) return;
+  try { await idbStore.put(LAST_FOLDER_KEY, handle); } catch (e) { /* 無法記住，下次重選 */ }
+}
+
+async function lastFolder() {
+  if (!ui.check.caps.idb) return null;
+  try { return await idbStore.get(LAST_FOLDER_KEY); } catch (e) { return null; }
+}
+
+function profileOk() {
+  const p = loadProfile();
+  return p.user.trim() && p.pc.trim();
+}
+
+async function pickFolder() {
+  if (!profileOk()) { await alertBox('請先輸入使用者', '請先輸入「員編／姓名」及「電腦代號」並按儲存。'); return null; }
+  try {
+    return await window.showDirectoryPicker({ id: 'specdrug', mode: 'readwrite' });
+  } catch (e) {
+    if (e && e.name === 'AbortError') return null;
+    throw e;
+  }
+}
+
+async function openHandle(handle, { allowInit } = {}) {
+  const perm = await queryPermission(handle);
+  if (perm !== 'granted') {
+    const p2 = await requestPermission(handle);
+    if (p2 !== 'granted') {
+      await alertBox('未授權', '未取得資料夾讀寫授權，無法開啟。可再按「重新授權上次資料夾」或重新選擇。');
+      return;
+    }
+  }
+  const fs = browserFs(handle);
+  const kind = await inspectFolder(fs);
+  if (kind === 'other') {
+    await alertBox('不是本系統資料夾', `「${handle.name}」內已有其他檔案，且沒有 specdrug.json。`, '開啟既有資料請選含 specdrug.json 的資料夾；建立新資料請選空資料夾。');
+    return;
+  }
+  const session = new AppSession({
+    fs, profile: loadProfile(), draftStore: ui.check.caps.idb ? idbStore : null,
+    locks: browserLocks(navigator), caps: ui.check, localSessions: LOCAL_CLOSED_RELEASE ? localSessions : null,
+  });
+  if (kind === 'empty') {
+    if (!allowInit) {
+      await alertBox('空資料夾', `「${handle.name}」是空資料夾。要建立新資料夾請按「建立新資料夾」。`);
+      return;
+    }
+    const kw = await askNewKeyword();
+    if (!kw) return;
+    await session.create(kw);
+  } else {
+    await session.open();
+  }
+  await rememberFolder(handle);
+  attach(session, handle.name);
+  if (session.mode === 'error') return;
+  await offerRecovery();
+}
+
+function attach(session, name) {
+  if (ui.session) { ui.session.closing(); }
+  ui.session = session;
+  ui.folderName = name;
+  ui.tab = 'home';
+  session.onChange(() => render());
+  startTimers();
+  render();
+}
+
+async function askNewKeyword(title = '設定強制收回關鍵詞') {
+  const k1 = h('input', { type: 'password', autocomplete: 'new-password' });
+  const k2 = h('input', { type: 'password', autocomplete: 'new-password' });
+  const msg = h('p', { class: 'warn-text', role: 'alert' });
+  const v = await dialog(title, [
+    h('p', { text: `關鍵詞用於「強制收回」編輯牌；至少 ${MIN_KEYWORD_LENGTH} 個字。只存加鹽雜湊，不存明文。請交由保管者保存（Q16）。` }),
+    h('label', null, '關鍵詞 ', k1), h('br'), h('label', null, '再輸入一次 ', k2), msg,
+  ], [
+    { label: '取消', value: null },
+    { label: '確定', value: 'ok', primary: true, validate: () => {
+      if (k1.value.trim().length < MIN_KEYWORD_LENGTH) { msg.textContent = `至少 ${MIN_KEYWORD_LENGTH} 個字`; return false; }
+      if (k1.value !== k2.value) { msg.textContent = '兩次輸入不同'; return false; }
+      return true;
+    } },
+  ]);
+  return v ? k1.value : null;
+}
+
+// ---------- 復原草稿 ----------
+async function offerRecovery() {
+  const s = ui.session;
+  const rc = await s.recoveryCheck();
+  if (rc.kind === 'none' || rc.kind === 'error') return;
+  const d = rc.draft;
+  const info = `本機有復原草稿：${fmtIso(d.saved_at)}，${who(d)}，未儲存變更 ${d.dirty} 項，基準 ${revLabel(d.base_revision)}（目前 ${revLabel(s.current.revision)}）。`;
+  if (rc.kind === 'same_base') {
+    const v = await dialog('復原草稿', [h('p', { text: info }), h('p', { text: '復原須先取得編輯牌。' })], [
+      { label: '稍後再說', value: null },
+      { label: '放棄草稿', value: 'discard' },
+      { label: '取得編輯牌並復原', value: 'apply', primary: true },
+    ]);
+    if (v === 'discard') await s.discardDraft();
+    if (v === 'apply') {
+      const r = await s.startEdit();
+      if (!r.ok) { await explainStartFail(r); return; }
+      ui.recovering = true;
+      try { await afterAcquire(r); } finally { ui.recovering = false; }
+      await s.applyDraft();
+    }
+  } else {
+    const v = await dialog('復原草稿（基準不同）', [
+      h('p', { text: info }),
+      h('p', { class: 'warn-text', text: '資料夾已有較新版本，草稿不自動套用。請另存為復原檔，核對後手動重套。' }),
+    ], [
+      { label: '稍後再說', value: null },
+      { label: '放棄草稿', value: 'discard' },
+      { label: '另存為復原檔', value: 'export', primary: true },
+    ]);
+    if (v === 'export') {
+      const name = `特藥_復原草稿_${taipeiCompact(Date.now())}_${revLabel(d.base_revision)}.json`;
+      const r = await saveTextAs(name, JSON.stringify(d, null, 2));
+      if (r.saved) {
+        const v2 = await dialog('已另存', [h('p', { text: `已存為「${r.name}」。要刪除本機草稿嗎？` })], [
+          { label: '保留', value: null }, { label: '刪除本機草稿', value: 'del', primary: true },
+        ]);
+        if (v2 === 'del') await s.discardDraft();
+      }
+    }
+    if (v === 'discard') {
+      const ok = await dialog('確認放棄', [h('p', { text: '放棄後無法取回此草稿。確定放棄？' })], [{ label: '取消', value: null }, { label: '放棄', value: true, primary: true }]);
+      if (ok) await s.discardDraft();
+    }
+  }
+}
+
+// ---------- 編輯牌 ----------
+async function explainStartFail(r) {
+  const s = ui.session;
+  if (r.status === 'held' || r.status === 'checking') {
+    const t = r.token;
+    const last = r.lastSeen ? taipeiHM(r.lastSeen) : '確認中';
+    const v = await dialog('編輯牌在他人手上', [
+      h('p', { text: `編輯牌目前在 ${(t.holder && t.holder.user) || '（不明）'}（電腦：${(t.holder && t.holder.pc) || '不明'}）手上，自 ${taipeiHM(parseIso(t.acquired_at))} 起，最後回應 ${last}。` }),
+      r.status === 'checking' ? h('p', { class: 'warn-text', text: '檔案時間與本機時間差異異常，正以心跳序號觀察判定（確認中）。' }) : null,
+      h('p', { text: '請待對方結束編輯，或使用「強制收回」。' }),
+    ], [
+      { label: '繼續查詢', value: null },
+      { label: '重新檢查', value: 'retry' },
+      { label: '強制收回', value: 'force', primary: true },
+    ]);
+    if (v === 'retry') { const r2 = await s.startEdit(); if (!r2.ok) await explainStartFail(r2); else await afterAcquire(r2); }
+    if (v === 'force') await doForce();
+    return;
+  }
+  const map = {
+    blocked: ['只能查詢', ...(r.reasons || [])],
+    tab_locked: ['只能查詢', '此資料夾已在同一瀏覽器的另一分頁編輯中。請回到該分頁，或先關閉該分頁。'],
+    stale_view: ['資料夾有新版', '資料夾已有新版本，請先按「重新載入」再開始編輯。'],
+    race: ['取牌未成功', `幾乎同時有人取牌，目前持牌：${who(r.token && r.token.holder)}。已退回查詢模式。`],
+    error: ['取牌失敗', r.error || ''],
+  };
+  const m = map[r.status] || ['無法開始編輯', r.status];
+  await alertBox(m[0], ...m.slice(1));
+}
+
+async function afterAcquire(r) {
+  if (r.status === 'took_local' && r.previous) {
+    await alertBox('已取得編輯牌', `前一位持牌者為本瀏覽器先前的分頁（${who(r.previous.holder)}，最後回應 ${fmtIso(r.previous.heartbeat_at)}），該分頁已關閉，視同已歸還。`);
+  }
+  if (r.status === 'took_stale' && r.previous) {
+    await alertBox('已取得編輯牌', `前一位持牌者 ${who(r.previous.holder)} 最後回應 ${fmtIso(r.previous.heartbeat_at)}，已超過 ${ui.session.settings.stale_min} 分鐘無回應，視為已關閉。`);
+  }
+  if (await ui.session.keywordMissing()) {
+    const kw = await askNewKeyword('關鍵詞檔不存在，請重新設定');
+    if (kw) await ui.session.resetMissingKeyword(kw);
+  }
+  startTimers();
+  if (!ui.session.hasUnsaved || (ui.session.dirty === 0)) {
+    const rc = await ui.session.recoveryCheck();
+    if (rc.kind === 'same_base' && !ui.recovering) {
+      const v = await dialog('復原草稿', [h('p', { text: `本機有復原草稿（${fmtIso(rc.draft.saved_at)}，未儲存變更 ${rc.draft.dirty} 項），基準與目前版本相同。` })], [
+        { label: '稍後再說', value: null }, { label: '放棄草稿', value: 'discard' }, { label: '復原', value: 'apply', primary: true },
+      ]);
+      if (v === 'apply') await ui.session.applyDraft();
+      if (v === 'discard') await ui.session.discardDraft();
+    }
+  }
+}
+
+async function doStartEdit() {
+  const r = await ui.session.startEdit();
+  if (!r.ok) { await explainStartFail(r); return; }
+  await afterAcquire(r);
+}
+
+async function doEndEdit() {
+  const s = ui.session;
+  let choice;
+  if (s.dirty > 0) {
+    choice = await dialog('結束編輯', [h('p', { text: `有 ${s.dirty} 項未儲存變更。` })], [
+      { label: '取消', value: null },
+      { label: '放棄變更', value: 'discard' },
+      { label: '保留本機草稿', value: 'draft' },
+      { label: '儲存', value: 'save', primary: true },
+    ]);
+    if (!choice) return;
+  }
+  const r = await s.endEdit(choice);
+  if (r.releaseError) await alertBox('還牌未完成', `編輯牌改寫失敗：${r.releaseError}。他人須待 ${s.settings.stale_min} 分鐘無心跳後才能取牌。`);
+}
+
+async function doSave() {
+  const s = ui.session;
+  try {
+    const r = await s.save();
+    if (r.status === 'already') await alertBox('已儲存', '先前一次儲存已完成（依 save_id 判定），未重複建立版本。');
+  } catch (e) {
+    if (e.code === 'OVERWRITTEN') { await alertBox('目前版本已被其他人覆蓋', e.message, '本次變更仍保留於復原草稿。'); return; }
+    if (e.code === 'CONFLICT') { await alertBox('儲存被拒', e.message, '你的變更已保留於本機復原草稿。請結束編輯（保留草稿）→重新載入→核對後重套。'); return; }
+    if (e.code === 'TOKEN_LOST') { await alertBox('儲存被拒', e.message); return; }
+    throw e;
+  }
+}
+
+async function doForce() {
+  const s = ui.session;
+  const st = s.guard.status();
+  if (st.locked) { await alertBox('暫停嘗試', `連續輸錯，請 ${Math.ceil(st.remainMs / 1000)} 秒後再試。`); return; }
+  const kw = h('input', { type: 'password', autocomplete: 'off' });
+  const reason = h('input', { type: 'text', size: 30 });
+  const msg = h('p', { class: 'warn-text', role: 'alert' });
+  const holder = s.tokenStatus && s.tokenStatus.token && s.tokenStatus.token.holder;
+  const v = await dialog('強制收回編輯牌', [
+    h('p', { text: `目前持牌：${who(holder)}。收回後對方將於下次心跳（約${s.settings.heartbeat_sec}秒內）改為查詢模式，其未儲存變更保留於對方電腦的復原草稿。` }),
+    h('label', null, '關鍵詞 ', kw), h('br'), h('label', null, '收回原因 ', reason), msg,
+  ], [
+    { label: '取消', value: null },
+    { label: '強制收回', value: 'go', primary: true, validate: () => {
+      if (!reason.value.trim()) { msg.textContent = '請填收回原因'; return false; }
+      return true;
+    } },
+  ]);
+  if (!v) return;
+  const r = await s.forceTakeover(kw.value, reason.value);
+  if (r.ok) { await alertBox('已收回', '已取得編輯牌。收回紀錄將於下次存檔（或結束編輯時）寫入稽核。'); await afterAcquire(r); return; }
+  const map = {
+    wrong: `關鍵詞不正確，未收回。再錯 ${r.remaining} 次將暫停30秒。`,
+    locked: `連續輸錯，請 ${Math.ceil((r.remainMs || 0) / 1000)} 秒後再試。`,
+    no_keyword: '尚未設定關鍵詞（control/keyword.json 不存在），無法強制收回。請待持牌者結束編輯或逾時；取牌後可重新設定。',
+    need_reason: '請填收回原因。',
+    blocked: '只能查詢：' + (r.reasons || []).join('；'),
+    tab_locked: '此資料夾已在同一瀏覽器的另一分頁編輯中。',
+    stale_view: '資料夾有新版，請先重新載入。',
+    race: '收回時有人同時取牌，未成功。',
+  };
+  await alertBox('未收回', map[r.status] || r.status);
+}
+
+async function doReload() {
+  const s = ui.session;
+  if (s.mode === 'edit' && s.hasUnsaved) { await alertBox('有未儲存變更', '請先儲存或結束編輯（保留草稿）後再重新載入。'); return; }
+  await s.reload();
+  startTimers();
+}
+
+// ---------- 畫面 ----------
+function renderStatusBar() {
+  const s = ui.session;
+  const bar = h('div', { class: 'statusbar', role: 'status' });
+  if (!s || s.mode === 'closed') {
+    bar.appendChild(h('span', { text: '尚未開啟資料夾' }));
+    return bar;
+  }
+  const st = s.statusInfo();
+  const modeText = st.mode === 'edit' ? '編輯中' : st.mode === 'query' ? '查詢' : '無法開啟';
+  bar.appendChild(h('span', { class: 'chip' + (st.mode === 'edit' ? ' chip-edit' : ''), text: `模式：${modeText}` }));
+  bar.appendChild(h('span', { text: `資料夾：${ui.folderName}` }));
+  const t = st.token;
+  let tokText = '編輯牌：狀態不明';
+  if (t) {
+    if (t.status === 'free') tokText = '編輯牌：無人持有';
+    else if (t.status === 'mine') tokText = `編輯牌：本分頁持有（自 ${taipeiHM(parseIso(t.token.acquired_at))}）`;
+    else if (t.status === 'held') tokText = `編輯牌：${who(t.token.holder)}持有（自 ${taipeiHM(parseIso(t.token.acquired_at))}，最後回應 ${taipeiHM(t.lastSeen)}）`;
+    else if (t.status === 'checking') tokText = `編輯牌：${who(t.token.holder)}持有（確認中）`;
+    else if (t.status === 'stale') tokText = `編輯牌：${who(t.token.holder)}已逾時無回應（可取牌）`;
+  }
+  if (st.tokenUncertain) tokText = '編輯牌狀態不明（心跳寫入失敗，暫停存檔）';
+  bar.appendChild(h('span', { class: st.tokenUncertain ? 'warn-text' : '', text: tokText }));
+  if (st.revision !== undefined && st.revision !== null) bar.appendChild(h('span', { text: `${revLabel(st.revision)}｜${fmtIso(st.savedAt)}` }));
+  bar.appendChild(h('span', { class: st.unsaved ? 'warn-text' : '', text: `未儲存變更：${st.unsaved}${st.pendingAudit && !st.unsaved ? `（待寫入稽核 ${st.pendingAudit} 筆）` : ''}` }));
+  bar.appendChild(h('span', { text: '主檔：尚未匯入' }));
+  if (st.newerAvailable) bar.appendChild(h('span', { class: 'chip chip-warn', text: '資料夾有新版，請重新載入' }));
+  return bar;
+}
+
+function renderToolbar() {
+  const s = ui.session;
+  const bar = h('div', { class: 'toolbar' });
+  if (!s || (s.mode !== 'query' && s.mode !== 'edit')) return bar;
+  if (s.mode === 'query') {
+    const blockers = s.editBlockers();
+    bar.appendChild(btn('開始編輯', () => guard(doStartEdit), { primary: true, disabled: blockers.length > 0, title: blockers.join('；') }));
+    const t = s.tokenStatus;
+    if (t && (t.status === 'held' || t.status === 'checking')) bar.appendChild(btn('強制收回', () => guard(doForce), { disabled: blockers.length > 0 }));
+    bar.appendChild(btn('重新載入', () => guard(doReload)));
+  } else {
+    bar.appendChild(btn('儲存', () => guard(doSave), { primary: true, disabled: !s.hasUnsaved || s.tokenUncertain }));
+    bar.appendChild(btn('結束編輯', () => guard(doEndEdit)));
+  }
+  bar.appendChild(btn('關閉資料夾', () => guard(closeFolder)));
+  return bar;
+}
+
+async function closeFolder() {
+  const s = ui.session;
+  if (s && s.mode === 'edit') {
+    await doEndEdit();
+    if (s.mode === 'edit') return;
+  }
+  stopTimers();
+  ui.session = null;
+  ui.folderName = '';
+}
+
+function renderTabs() {
+  const tabs = [['home', '首頁'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
+    type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
+    on: { click: () => { ui.tab = k; render(); } },
+  })));
+}
+
+function renderSelfCheck() {
+  const c = ui.check;
+  const rows = c.items.map((it) => [it.label, it.ok ? '✔ 通過' : '✘ 未通過', it.ok ? '' : it.effect]);
+  const s = ui.session;
+  if (s && s.mode !== 'closed' && s.mode !== 'error') {
+    rows.push(['資料夾寫入測試（建立並刪除暫存測試檔）', s.canWrite ? '✔ 通過' : '✘ 未通過', s.canWrite ? '' : `只提供查詢模式：${s.writeError}`]);
+  }
+  return table(['檢查', '結果', '未通過時'], rows);
+}
+
+function renderStart() {
+  const p = loadProfile();
+  const user = h('input', { type: 'text', value: p.user, size: 16, 'aria-label': '員編／姓名' });
+  const pc = h('input', { type: 'text', value: p.pc, size: 12, 'aria-label': '電腦代號' });
+  const c = ui.check;
+  const box = h('section', { class: 'panel' },
+    h('h2', { text: '開始使用' }),
+    h('p', { class: 'note', text: '瀏覽器無法讀取Windows登入帳號，請輸入員編／姓名及電腦代號；此名稱供顯示與稽核記錄，非身分驗證。存於本機瀏覽器設定，換人登入同一台電腦須重新輸入。' }),
+    h('label', null, '員編／姓名 ', user), ' ',
+    h('label', null, '電腦代號 ', pc), ' ',
+    btn('儲存使用者', () => { saveProfile({ user: user.value.trim(), pc: pc.value.trim() }); render(); }),
+    h('div', { class: 'toolbar' },
+      btn('開啟資料夾', () => guard(async () => { const d = await pickFolder(); if (d) await openHandle(d, { allowInit: false }); }), { primary: true, disabled: !c.canFolder }),
+      btn('重新授權上次資料夾', () => guard(async () => {
+        const d = await lastFolder();
+        if (!d) { await alertBox('沒有上次資料夾', '本瀏覽器尚未記住資料夾，請按「開啟資料夾」。'); return; }
+        if (!profileOk()) { await alertBox('請先輸入使用者', '請先輸入「員編／姓名」及「電腦代號」並按儲存。'); return; }
+        await openHandle(d, { allowInit: false });
+      }), { disabled: !c.canFolder || !c.caps.idb }),
+      btn('建立新資料夾（選空資料夾）', () => guard(async () => { const d = await pickFolder(); if (d) await openHandle(d, { allowInit: true }); }), { disabled: !c.canFolder }),
+    ),
+    c.canFolder ? null : h('p', { class: 'warn-text', text: '只能唯讀：' + c.readonlyReasons.join('；') + '。開啟備份zip查詢及匯出將於備份還原階段提供。' }),
+  );
+  return [box, h('section', { class: 'panel' }, h('h2', { text: '啟動自檢' }), renderSelfCheck())];
+}
+
+function renderError() {
+  const s = ui.session;
+  const errs = s.openErrors || [];
+  const versions = (s.lastOpen && s.lastOpen.versions) || [];
+  return h('section', { class: 'panel' },
+    h('h2', { text: '資料夾無法開啟' }),
+    h('p', { class: 'warn-text', text: '程式不自動改用其他版本、不靜默修正。請依下列原因處理，或唯讀開啟某一版本核對。' }),
+    table(['原因', '位置'], errs.map((e) => [e.message, e.where || ''])),
+    h('h3', { text: 'data/versions/ 版本檔' }),
+    table(['revision', '檔名', ''], versions.map((v) => [revLabel(v.revision), v.name, btn('唯讀檢視', () => guard(() => viewVersion(v.name)))])),
+  );
+}
+
+async function viewVersion(name) {
+  const s = ui.session;
+  const v = await loadVersion(s.fs, name, { meta: s.meta });
+  const hd = v.header || {};
+  await alertBox(`版本 ${name}`,
+    `驗證：${v.ok ? '通過' : '未通過'}${v.errors.length ? '：' + v.errors.map((e) => e.message).join('；') : ''}`,
+    `revision：${hd.revision}，儲存時間：${fmtIso(hd.saved_at)}，操作者：${who(hd.saved_by)}`,
+    `程式版本：${hd.app_version}，資料結構版本：${hd.schema_version}，摘要：${hd.summary || ''}`,
+    `稽核：${v.audit ? v.audit.length : 0} 筆`);
+}
+
+function renderHome() {
+  const s = ui.session;
+  const c = s.committed.data.collections;
+  return h('section', { class: 'panel' },
+    h('h2', { text: '首頁' }),
+    h('p', { text: `目前版本 ${revLabel(s.current.revision)}，儲存於 ${fmtIso(s.current.saved_at)}，操作者 ${who(s.current.saved_by)}。` }),
+    h('p', { class: 'note', text: '業務功能（收案、會議、主檔匯入、認定、公告、合約、查詢、匯出、備份還原、移轉）將於後續階段加入。' }),
+    table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])),
+  );
+}
+
+let historyCache = null;
+
+function renderHistory() {
+  const s = ui.session;
+  const box = h('section', { class: 'panel' }, h('h2', { text: '儲存歷程' }),
+    btn('檢查全部版本檔', () => guard(async () => { historyCache = await s.history(); })));
+  if (historyCache) {
+    box.appendChild(table(['revision', '儲存時間', '操作者', '摘要', '雜湊檢查', '狀態', ''], historyCache.slice().reverse().map((r) => [
+      revLabel(r.revision),
+      fmtIso(r.header && r.header.saved_at),
+      who(r.header && r.header.saved_by),
+      (r.header && r.header.summary) || '',
+      r.ok ? '✔ 一致' : '✘ ' + r.notes.join('；'),
+      r.isCurrent ? '目前版本' : r.inChain ? '歷史版本' : '未被引用（儲存中斷殘留或分支）',
+      btn('唯讀檢視', () => guard(() => viewVersion(r.name))),
+    ])));
+  }
+  const audit = s.committed.audit.slice(-50).reverse();
+  box.appendChild(h('h3', { text: '稽核紀錄（最近50筆）' }));
+  box.appendChild(table(['序號', '時間', '操作者', '動作', '原因'], audit.map((e) => [e.seq, fmtIso(e.at), who(e), e.action, e.reason || ''])));
+  return box;
+}
+
+function renderSettings() {
+  const s = ui.session;
+  const cur = s.settings;
+  const editable = s.mode === 'edit';
+  const inputs = {};
+  const rows = Object.keys(DEFAULT_SETTINGS).map((k) => {
+    const v = cur[k];
+    const inp = typeof v === 'boolean'
+      ? h('input', { type: 'checkbox', checked: v, disabled: !editable })
+      : h('input', { type: 'number', value: String(v), disabled: !editable, style: 'width:6em' });
+    inputs[k] = inp;
+    return [settingLabel(k), inp, String(DEFAULT_SETTINGS[k])];
+  });
+  const box = h('section', { class: 'panel' }, h('h2', { text: '設定' }),
+    editable ? null : h('p', { class: 'note', text: '查詢模式僅可檢視；修改須先取得編輯牌。' }),
+    table(['項目', '值', '預設'], rows));
+  if (editable) {
+    box.appendChild(btn('套用設定（成為未儲存變更）', () => guard(async () => {
+      const patch = {};
+      for (const [k, inp] of Object.entries(inputs)) patch[k] = inp.type === 'checkbox' ? inp.checked : inp.value;
+      const r = await s.updateSettings(patch);
+      if (!r.changed) await alertBox('未變更', '設定值與目前相同。');
+    }), { primary: true }));
+    box.appendChild(h('h3', { text: '強制收回關鍵詞' }));
+    box.appendChild(btn('修改關鍵詞', () => guard(async () => {
+      const old = h('input', { type: 'password', autocomplete: 'current-password' });
+      const ok = await dialog('修改關鍵詞', [h('label', null, '原關鍵詞 ', old)], [{ label: '取消', value: null }, { label: '下一步', value: true, primary: true }]);
+      if (!ok) return;
+      const nk = await askNewKeyword('輸入新關鍵詞');
+      if (!nk) return;
+      await s.changeKeyword(old.value, nk);
+      await alertBox('已修改', '關鍵詞已更新；稽核紀錄將於下次存檔寫入。');
+    })));
+  }
+  return box;
+}
+
+function renderAbout() {
+  const s = ui.session;
+  return [
+    h('section', { class: 'panel' }, h('h2', { text: '關於' }),
+      table(['項目', '內容'], [
+        ['程式版本', APP_VERSION], ['資料結構版本', String(SCHEMA_VERSION)], ['建置日期', BUILD_DATE], ['原始碼commit', BUILD_COMMIT],
+        ['資料夾id', s.meta ? s.meta.folder_id : ''], ['本分頁工作階段id', s.session.id],
+        ['使用者', who(s.session)], ['開啟位置', window.location.protocol + '//' + window.location.host + window.location.pathname],
+        ['瀏覽器', navigator.userAgent],
+      ]),
+      h('p', { class: 'note', text: '編輯牌是程式之間的約定，不是檔案伺服器仲裁的獨占鎖；關鍵詞用來防止誤按與隨意搶牌，不是資安控管（第4.6節第15、16點）。' })),
+    h('section', { class: 'panel' }, h('h2', { text: '啟動自檢' }), renderSelfCheck()),
+  ];
+}
+
+function render() {
+  const root = $root();
+  clear(root);
+  root.appendChild(h('header', { class: 'top' },
+    h('h1', { text: '特殊藥品認定、調高及供貨合約管理系統' }),
+    h('span', { class: 'ver', text: `v${APP_VERSION}｜資料結構 ${SCHEMA_VERSION}` })));
+  root.appendChild(renderStatusBar());
+  const s = ui.session;
+  if (!s) {
+    root.appendChild(h('main', null, renderStart()));
+    return;
+  }
+  root.appendChild(renderToolbar());
+  if (s.mode === 'error') {
+    root.appendChild(h('main', null, renderError(), h('div', { class: 'toolbar' }, btn('關閉資料夾', () => guard(closeFolder)))));
+    return;
+  }
+  root.appendChild(renderTabs());
+  const views = { home: renderHome, history: renderHistory, settings: renderSettings, about: renderAbout };
+  root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
+}
+
+function boot() {
+  ui.check = selfCheck(window);
+  window.addEventListener('beforeunload', (e) => {
+    if (ui.session && ui.session.hasUnsaved) { e.preventDefault(); e.returnValue = ''; }
+  });
+  window.addEventListener('pagehide', () => {
+    if (ui.session) ui.session.closing();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && ui.session) onPoll();
+  });
+  render();
+}
+
+boot();
+
+return {  };
+})();
+
+</script>
+</body>
+</html>
