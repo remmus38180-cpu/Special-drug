@@ -14,3 +14,4 @@ node_modules/
 # 業務資料（移轉驗收用），不得commit
 *.xlsx
 !web/test/fixtures/*.xlsx
+!web/dist/

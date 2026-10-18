@@ -1,0 +1,12 @@
+{
+  "name": "specdrug-web",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "特殊藥品認定、調高及供貨合約管理系統（單機HTML版）開發工具；使用者端不需要。",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "e2e": "node test/e2e/run.mjs"
+  }
+}

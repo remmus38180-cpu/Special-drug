@@ -1,0 +1,49 @@
+/* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
+:root {
+  --bg: #f4f4f2; --panel: #ffffff; --line: #2b2b2b; --text: #1e1e1e; --muted: #555555;
+  --accent: #81d8cf; --accent-weak: #dcf3f0; --accent-deep: #3e8f86;
+  --pink: #f7e1e5; --pink-deep: #8a2f40;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body {
+  font-family: "LXGW WenKai TC", "霞鶩文楷 TC", "Microsoft JhengHei", "微軟正黑體", sans-serif;
+  font-size: 15px; line-height: 1.6;
+}
+#app { max-width: 1280px; margin: 0 auto; padding: 0 16px 32px; }
+header.top { display: flex; align-items: baseline; gap: 16px; padding: 12px 0 4px; border-bottom: 3px solid var(--accent); flex-wrap: wrap; }
+header.top h1 { font-size: 20px; margin: 0; }
+.ver { color: var(--muted); font-size: 13px; }
+.statusbar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 6px 8px; margin: 8px 0; background: var(--panel); border: 1px solid var(--line); font-size: 14px; }
+.chip { border: 1px solid var(--line); padding: 0 8px; background: var(--accent-weak); }
+.chip-edit { background: var(--accent); font-weight: bold; }
+.chip-warn { background: var(--pink); font-weight: bold; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+button {
+  font: inherit; padding: 3px 12px; cursor: pointer; color: var(--text);
+  background: var(--panel); border: 2px solid var(--line); border-radius: 0;
+}
+button.primary { background: var(--accent-weak); }
+button:active { color: var(--text); }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--accent-deep); outline-offset: 1px; }
+button:disabled { cursor: not-allowed; border-style: dashed; color: #777; }
+input[type=text], input[type=password], input[type=number] { font: inherit; border: 1px solid var(--line); padding: 2px 6px; background: #fff; }
+.tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 2px solid var(--line); margin-top: 8px; }
+.tab { border-bottom: none; margin-right: -2px; background: var(--bg); }
+.tab-on { background: var(--accent-weak); font-weight: bold; text-decoration: underline; }
+.panel { background: var(--panel); border: 1px solid var(--line); padding: 12px 16px; margin: 12px 0; overflow-x: auto; }
+.panel h2 { font-size: 17px; margin: 0 0 8px; }
+.panel h3 { font-size: 15px; margin: 16px 0 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; vertical-align: top; }
+th { background: var(--accent-weak); position: sticky; top: 0; }
+.note { color: var(--muted); font-size: 13px; }
+.warn-text { color: var(--pink-deep); font-weight: bold; }
+dialog.dlg { border: 2px solid var(--line); padding: 16px 20px; max-width: 640px; background: var(--panel); color: var(--text); }
+dialog.dlg::backdrop { background: rgba(40, 40, 40, 0.35); }
+dialog.dlg h2 { font-size: 17px; margin: 0 0 8px; border-bottom: 2px solid var(--accent); }
+.dlg-buttons { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 12px; }
+@media print {
+  .toolbar, .tabs, button { display: none; }
+  .statusbar { position: static; }
+}
