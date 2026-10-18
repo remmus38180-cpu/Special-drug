@@ -9,3 +9,8 @@ dist/
 *.sqlite
 *.sqlite-journal
 /demo_data/
+# v0.4 HTML版
+node_modules/
+# 業務資料（移轉驗收用），不得commit
+*.xlsx
+!web/test/fixtures/*.xlsx

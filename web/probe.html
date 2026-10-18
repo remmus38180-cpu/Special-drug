@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="version" content="probe-0.4.0">
+<title>特殊藥品管理 環境探針 probe-0.4.0</title>
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --line: #333333; --text: #1e1e1e;
+    --accent: #81d8cf; --accent-weak: #d9f3f0; --pink: #f6dfe3;
+    --ok: #1d6b5f; --ng: #8a2433; --warn: #6b5413;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font-family: "LXGW WenKai TC", "霞鶩文楷 TC", "Microsoft JhengHei", "微軟正黑體", sans-serif;
+    font-size: 15px; line-height: 1.6;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  .sub { color: #555; margin: 0 0 12px; }
+  section { background: var(--panel); border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; }
+  button {
+    font: inherit; padding: 4px 12px; margin: 2px 4px 2px 0; cursor: pointer;
+    background: var(--accent-weak); color: var(--text); border: 2px solid var(--line);
+  }
+  button:active { background: var(--accent-weak); color: var(--text); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+  button:disabled { cursor: not-allowed; border-style: dashed; color: #777; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--accent-weak); }
+  td.r-ok::before { content: "✔ "; }
+  td.r-ng::before { content: "✘ "; }
+  td.r-warn::before { content: "△ "; }
+  td.r-skip::before { content: "－ "; }
+  td.r-ok { color: var(--ok); font-weight: bold; }
+  td.r-ng { color: var(--ng); font-weight: bold; background: var(--pink); }
+  td.r-warn { color: var(--warn); font-weight: bold; }
+  textarea { width: 100%; height: 220px; font-family: Consolas, "Courier New", monospace; font-size: 13px; border: 1px solid var(--line); }
+  label { margin-right: 12px; }
+  input[type=text] { font: inherit; border: 1px solid var(--line); padding: 2px 6px; }
+  .note { font-size: 13px; color: #444; }
+</style>
+</head>
+<body>
+<h1>特殊藥品管理 環境探針</h1>
+<p class="sub">版本 probe-0.4.0｜檢查本機瀏覽器能否執行單機HTML版（規格書 v0.4 第4.3節）。本頁不連網、不上傳、不自動下載；所有結果只顯示於畫面。</p>
+
+<section>
+  <h2>一、使用方式</h2>
+  <ol class="note">
+    <li>以機關瀏覽器開啟本檔（雙擊本機檔案；另測由檔案總管網路位置〔共用槽〕開啟）。</li>
+    <li>頁面開啟即自動執行「基本能力」檢查。</li>
+    <li>按「選擇資料夾並測試」，選一個可寫入的資料夾（本機一次、共用槽一次）。程式會在其中建立暫存子資料夾 <code>_specdrug_probe_…</code>，測完即刪除。</li>
+    <li>可另按「兩分頁鎖測試」「背景計時測試」「下載測試」「另存對話框測試」。</li>
+    <li>按「複製結果文字」，貼到驗收紀錄。複製失敗時可直接框選下方文字框。</li>
+    <li>可重新整理或關閉瀏覽器後再開，按「以記住的資料夾重測」，檢查授權記憶（H08）。</li>
+  </ol>
+  <label>測試者（員編／姓名，可空白）：<input type="text" id="tester" size="16"></label>
+  <label>電腦代號（可空白）：<input type="text" id="pc" size="12"></label>
+</section>
+
+<section>
+  <h2>二、操作</h2>
+  <button id="btnBasic">重跑基本能力</button>
+  <button id="btnFolder">選擇資料夾並測試</button>
+  <button id="btnRemembered">以記住的資料夾重測</button>
+  <button id="btnLock">兩分頁鎖測試</button>
+  <button id="btnTimer">背景計時測試（2分鐘）</button>
+  <button id="btnDownload">下載測試</button>
+  <button id="btnSaveAs">另存對話框測試</button>
+  <button id="btnCopy">複製結果文字</button>
+  <p class="note" id="status" role="status" aria-live="polite">就緒。</p>
+</section>
+
+<section>
+  <h2>三、結果</h2>
+  <table>
+    <thead><tr><th style="width:30%">項目</th><th style="width:12%">結果</th><th>說明</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>四、結果文字（可複製）</h2>
+  <textarea id="out" readonly></textarea>
+</section>
+
+<script>
+"use strict";
+(function () {
+  var PROBE_VERSION = "probe-0.4.0";
+  var IDB_NAME = "specdrug_probe";
+  var IDB_STORE = "kv";
+  var LOCK_NAME = "specdrug_probe_lock";
+  var results = [];
+  var lockRelease = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var LABEL = { ok: "通過", ng: "未通過", warn: "注意", skip: "略過" };
+
+  function setStatus(msg) { $("status").textContent = msg; }
+
+  function add(item, res, detail) {
+    var i;
+    for (i = 0; i < results.length; i++) {
+      if (results[i].item === item) { results.splice(i, 1); break; }
+    }
+    results.push({ item: item, res: res, detail: String(detail || "") });
+    render();
+  }
+
+  function render() {
+    var tb = $("rows");
+    while (tb.firstChild) { tb.removeChild(tb.firstChild); }
+    results.forEach(function (r) {
+      var tr = document.createElement("tr");
+      var a = document.createElement("td"); a.textContent = r.item;
+      var b = document.createElement("td"); b.textContent = LABEL[r.res]; b.className = "r-" + r.res;
+      var c = document.createElement("td"); c.textContent = r.detail;
+      tr.appendChild(a); tr.appendChild(b); tr.appendChild(c);
+      tb.appendChild(tr);
+    });
+    $("out").value = textReport();
+  }
+
+  function pad(n, w) { var s = String(n); while (s.length < (w || 2)) { s = "0" + s; } return s; }
+  function localStamp(d) {
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " +
+      pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+
+  function textReport() {
+    var lines = [];
+    lines.push("特殊藥品管理 環境探針 " + PROBE_VERSION);
+    lines.push("產生時間（本機）：" + localStamp(new Date()) + "　UTC：" + new Date().toISOString());
+    lines.push("測試者：" + ($("tester").value || "（未填）") + "　電腦代號：" + ($("pc").value || "（未填）"));
+    lines.push("開啟位置：" + location.protocol + "//" + (location.host || "") + location.pathname);
+    lines.push("瀏覽器：" + navigator.userAgent);
+    lines.push("");
+    results.forEach(function (r) {
+      lines.push("[" + LABEL[r.res] + "] " + r.item + "：" + r.detail);
+    });
+    return lines.join("\n");
+  }
+
+  function errText(e) {
+    if (!e) { return "未知錯誤"; }
+    return (e.name ? e.name + "：" : "") + (e.message || String(e));
+  }
+
+  function hex(buf) {
+    var b = new Uint8Array(buf), s = "", i;
+    for (i = 0; i < b.length; i++) { s += (b[i] < 16 ? "0" : "") + b[i].toString(16); }
+    return s;
+  }
+
+  function sha256Text(text) {
+    return crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)).then(hex);
+  }
+
+  // ---------- IndexedDB ----------
+  function idbOpen() {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+      req.onblocked = function () { reject(new Error("IndexedDB 被其他分頁阻擋")); };
+    });
+  }
+  function idbTx(mode, fn) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(IDB_STORE, mode);
+        var store = tx.objectStore(IDB_STORE);
+        var out;
+        var req = fn(store);
+        if (req) { req.onsuccess = function () { out = req.result; }; }
+        tx.oncomplete = function () { db.close(); resolve(out); };
+        tx.onerror = function () { db.close(); reject(tx.error); };
+        tx.onabort = function () { db.close(); reject(tx.error || new Error("交易中止")); };
+      });
+    });
+  }
+  function idbPut(key, val) { return idbTx("readwrite", function (s) { return s.put(val, key); }); }
+  function idbGet(key) { return idbTx("readonly", function (s) { return s.get(key); }); }
+
+  // ---------- 基本能力 ----------
+  function runBasic() {
+    setStatus("基本能力檢查中…");
+    var proto = location.protocol;
+    add("開啟方式", proto === "file:" ? "ok" : "warn",
+      proto === "file:" ? "file://（正式使用方式）" + (location.host ? "，網路路徑主機：" + location.host : "") :
+        proto + "（非 file://，結果僅供參考）");
+
+    add("安全環境 isSecureContext", window.isSecureContext ? "ok" : "ng",
+      window.isSecureContext ? "true" : "false：將停用編輯（雜湊、UUID、檔案存取無法使用）");
+
+    var hasSubtle = !!(window.crypto && crypto.subtle && crypto.subtle.digest);
+    add("crypto.subtle", hasSubtle ? "ok" : "ng", hasSubtle ? "可用" : "不可用：將停用編輯");
+
+    var hasUUID = !!(window.crypto && typeof crypto.randomUUID === "function");
+    var uuid = "";
+    if (hasUUID) { try { uuid = crypto.randomUUID(); } catch (e) { hasUUID = false; uuid = errText(e); } }
+    add("crypto.randomUUID", hasUUID ? "ok" : "ng", hasUUID ? "可用，例：" + uuid : "不可用：將停用編輯 " + uuid);
+
+    var p = Promise.resolve();
+    if (hasSubtle) {
+      p = sha256Text("abc").then(function (h) {
+        var expect = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        add("SHA-256 正確性", h === expect ? "ok" : "ng", h === expect ? "\"abc\" 雜湊值正確" : "雜湊值不符：" + h);
+      }).catch(function (e) { add("SHA-256 正確性", "ng", errText(e)); });
+    } else {
+      add("SHA-256 正確性", "skip", "crypto.subtle 不可用");
+    }
+
+    var hasPicker = typeof window.showDirectoryPicker === "function";
+    add("檔案系統存取 showDirectoryPicker", hasPicker ? "ok" : "ng",
+      hasPicker ? "可用" : "不可用：只能唯讀模式（開啟備份zip查詢及匯出）");
+
+    var hasSave = typeof window.showSaveFilePicker === "function";
+    add("另存對話框 showSaveFilePicker", hasSave ? "ok" : "warn",
+      hasSave ? "可用（匯出可帶入預設檔名）" : "不可用：匯出改用瀏覽器下載");
+
+    var hasLocks = !!(navigator.locks && typeof navigator.locks.request === "function");
+    add("navigator.locks", hasLocks ? "ok" : "warn", hasLocks ? "可用" : "不可用：可編輯，但須提示勿開兩分頁");
+
+    var hasWorker = typeof window.Worker === "function" && typeof window.Blob === "function" && !!(window.URL && URL.createObjectURL);
+    if (hasWorker) {
+      p = p.then(testWorker);
+    } else {
+      add("Web Worker（Blob）", "warn", "不可用：大量匯入時畫面可能停頓");
+    }
+
+    add("TextEncoder／TextDecoder", (typeof TextEncoder === "function" && typeof TextDecoder === "function") ? "ok" : "ng",
+      typeof TextEncoder === "function" ? "可用" : "不可用");
+
+    var hasCS = typeof window.CompressionStream === "function" && typeof window.DecompressionStream === "function";
+    add("CompressionStream（參考）", hasCS ? "ok" : "warn", hasCS ? "可用" : "不可用（程式將以內嵌函式庫處理壓縮，不影響）");
+
+    if (window.indexedDB) {
+      p = p.then(testIDB);
+    } else {
+      add("IndexedDB", "warn", "不存在：可編輯，但無當機復原草稿、無法記住資料夾授權");
+    }
+
+    var q = new URLSearchParams(location.search);
+    var u = q.get("user");
+    add("網址參數 ?user=（Q14）", u ? "ok" : "skip",
+      u ? "取得：" + u + "（僅供預填，非身分驗證）" : "網址未帶 user 參數；如以捷徑測試 ?user=%USERNAME%，此處應顯示帳號");
+    if (u && !$("tester").value) { $("tester").value = u; }
+
+    try {
+      var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      add("時區", tz === "Asia/Taipei" ? "ok" : "warn", tz + "，本機時間 " + localStamp(new Date()));
+    } catch (e) { add("時區", "warn", errText(e)); }
+
+    var hasPersist = !!(navigator.storage && navigator.storage.persisted);
+    if (hasPersist) {
+      p = p.then(function () {
+        return navigator.storage.persisted().then(function (v) {
+          add("儲存持久性（參考）", v ? "ok" : "warn", v ? "已持久" : "未持久：瀏覽器清理資料時可能清除復原草稿（正式資料在資料夾，不受影響）");
+        }).catch(function (e) { add("儲存持久性（參考）", "warn", errText(e)); });
+      });
+    }
+
+    p = p.then(checkRemembered);
+    return p.then(function () { setStatus("基本能力檢查完成。"); }, function (e) { setStatus("基本能力檢查出錯：" + errText(e)); });
+  }
+
+  function testWorker() {
+    return new Promise(function (resolve) {
+      var url, w, timer;
+      try {
+        var src = "self.onmessage = function (e) { self.postMessage(e.data * 2); };";
+        url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+        w = new Worker(url);
+        timer = setTimeout(function () { add("Web Worker（Blob）", "warn", "逾時無回應"); cleanup(); }, 3000);
+        w.onmessage = function (e) {
+          clearTimeout(timer);
+          add("Web Worker（Blob）", e.data === 42 ? "ok" : "warn", e.data === 42 ? "可用" : "回傳異常：" + e.data);
+          cleanup();
+        };
+        w.onerror = function (e) {
+          clearTimeout(timer);
+          add("Web Worker（Blob）", "warn", "無法執行：" + (e.message || "錯誤") + "（大量匯入時畫面可能停頓）");
+          e.preventDefault();
+          cleanup();
+        };
+        w.postMessage(21);
+      } catch (e) {
+        add("Web Worker（Blob）", "warn", "無法建立：" + errText(e));
+        cleanup();
+      }
+      function cleanup() {
+        try { if (w) { w.terminate(); } } catch (e) { /* ignore */ }
+        try { if (url) { URL.revokeObjectURL(url); } } catch (e) { /* ignore */ }
+        resolve();
+      }
+    });
+  }
+
+  function testIDB() {
+    var token = "probe-" + Date.now();
+    return idbPut("rw_test", token).then(function () { return idbGet("rw_test"); }).then(function (v) {
+      add("IndexedDB 讀寫", v === token ? "ok" : "ng", v === token ? "寫入並讀回一致" : "讀回不一致：" + v);
+    }).catch(function (e) {
+      add("IndexedDB 讀寫", "warn", "失敗：" + errText(e) + "（可編輯，但無當機復原草稿）");
+    });
+  }
+
+  function checkRemembered() {
+    if (!window.indexedDB) { return Promise.resolve(); }
+    return idbGet("dir_handle").then(function (h) {
+      if (!h) {
+        add("記住的資料夾（H08）", "skip", "尚未記住資料夾；先執行「選擇資料夾並測試」，再重開瀏覽器測試");
+        return;
+      }
+      if (typeof h.queryPermission !== "function") {
+        add("記住的資料夾（H08）", "warn", "已記住「" + h.name + "」，但無法查詢權限");
+        return;
+      }
+      return h.queryPermission({ mode: "readwrite" }).then(function (st) {
+        add("記住的資料夾（H08）", st === "granted" ? "ok" : "warn",
+          "已記住「" + h.name + "」，目前權限：" + st + (st === "granted" ? "" : "（須按「以記住的資料夾重測」重新授權）"));
+      });
+    }).catch(function (e) {
+      add("記住的資料夾（H08）", "warn", "讀取失敗：" + errText(e));
+    });
+  }
+
+  // ---------- 資料夾 ----------
+  function pickFolder() {
+    if (typeof window.showDirectoryPicker !== "function") {
+      add("選擇資料夾", "ng", "showDirectoryPicker 不可用");
+      return;
+    }
+    setStatus("請在對話框選擇資料夾…");
+    window.showDirectoryPicker({ mode: "readwrite", id: "specdrug_probe" }).then(function (dir) {
+      add("選擇資料夾", "ok", "已選「" + dir.name + "」");
+      var p = Promise.resolve();
+      if (window.indexedDB) {
+        p = idbPut("dir_handle", dir).then(function () {
+          add("IndexedDB 記住資料夾授權", "ok", "資料夾代號已存入（重開瀏覽器後可測重新授權）");
+        }).catch(function (e) {
+          add("IndexedDB 記住資料夾授權", "warn", "無法存入：" + errText(e) + "（每次開啟須重選資料夾）");
+        });
+      }
+      return p.then(function () { return folderTests(dir); });
+    }).catch(function (e) {
+      if (e && e.name === "AbortError") { add("選擇資料夾", "skip", "使用者取消"); setStatus("已取消。"); return; }
+      add("選擇資料夾", "ng", errText(e));
+      setStatus("選擇資料夾失敗。");
+    });
+  }
+
+  function useRemembered() {
+    if (!window.indexedDB) { add("以記住的資料夾重測", "ng", "IndexedDB 不存在"); return; }
+    idbGet("dir_handle").then(function (h) {
+      if (!h) { add("以記住的資料夾重測", "skip", "尚未記住資料夾"); return; }
+      return h.queryPermission({ mode: "readwrite" }).then(function (st) {
+        if (st === "granted") { return "granted"; }
+        setStatus("請在瀏覽器提示中按「允許」…");
+        return h.requestPermission({ mode: "readwrite" });
+      }).then(function (st) {
+        if (!st) { return; }
+        add("以記住的資料夾重測", st === "granted" ? "ok" : "ng", "「" + h.name + "」重新授權結果：" + st);
+        if (st === "granted") { return folderTests(h); }
+      });
+    }).catch(function (e) {
+      add("以記住的資料夾重測", "ng", errText(e));
+    });
+  }
+
+  function writeText(fileHandle, text) {
+    return fileHandle.createWritable().then(function (w) {
+      return w.write(text).then(function () { return w.close(); });
+    });
+  }
+  function readFile(fileHandle) {
+    return fileHandle.getFile().then(function (f) {
+      return f.text().then(function (t) { return { text: t, lastModified: f.lastModified, size: f.size }; });
+    });
+  }
+
+  function folderTests(dir) {
+    setStatus("資料夾測試中…");
+    var subName = "_specdrug_probe_" + (window.crypto && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : String(Date.now()));
+    var sub = null, fh = null;
+    var v1 = "{\"probe\":\"v1\",\"t\":\"" + new Date().toISOString() + "\",\"中文\":\"特殊藥品\"}";
+    var v2 = "{\"probe\":\"v2\",\"t\":\"" + new Date().toISOString() + "\",\"pad\":\"" + new Array(2049).join("x") + "\"}";
+    var h1 = "", h2 = "";
+    var t0;
+
+    return dir.queryPermission({ mode: "readwrite" }).then(function (st) {
+      add("資料夾寫入權限", st === "granted" ? "ok" : "warn", "queryPermission：" + st);
+      return dir.getDirectoryHandle(subName, { create: true });
+    }).then(function (d) {
+      sub = d;
+      add("建立子資料夾", "ok", subName);
+      return sub.getFileHandle("probe.json", { create: true });
+    }).then(function (f) {
+      fh = f;
+      return sha256Text(v1);
+    }).then(function (h) {
+      h1 = h;
+      t0 = Date.now();
+      return writeText(fh, v1);
+    }).then(function () {
+      var ms = Date.now() - t0;
+      return readFile(fh).then(function (r) {
+        return sha256Text(r.text).then(function (hr) {
+          add("寫入並讀回", hr === h1 ? "ok" : "ng",
+            (hr === h1 ? "SHA-256 一致 " : "SHA-256 不一致 ") + hr.slice(0, 16) + "…，寫入耗時 " + ms + " ms");
+          var skew = r.lastModified - Date.now();
+          add("檔案修改時間與本機時間差（§4.6第8點）", Math.abs(skew) <= 120000 ? "ok" : "warn",
+            "檔案時間 " + localStamp(new Date(r.lastModified)) + "，差 " + Math.round(skew / 1000) + " 秒" +
+            (Math.abs(skew) <= 120000 ? "" : "（差異過大：心跳將改用序號觀察判定）"));
+        });
+      });
+    }).then(function () {
+      // 中止寫入：原內容須不變（H03 參考）
+      return fh.createWritable().then(function (w) {
+        return w.write("BROKEN-PARTIAL").then(function () { return w.abort(); });
+      }).then(function () {
+        return readFile(fh).then(function (r) { return sha256Text(r.text); }).then(function (hr) {
+          add("中止寫入不影響原檔（H03參考）", hr === h1 ? "ok" : "ng", hr === h1 ? "abort 後原內容不變" : "abort 後內容改變！");
+        });
+      }).catch(function (e) { add("中止寫入不影響原檔（H03參考）", "warn", errText(e)); });
+    }).then(function () {
+      return sha256Text(v2);
+    }).then(function (h) {
+      h2 = h;
+      t0 = Date.now();
+      return writeText(fh, v2);
+    }).then(function () {
+      var ms = Date.now() - t0;
+      return readFile(fh).then(function (r) { return sha256Text(r.text); }).then(function (hr) {
+        add("替換檔案內容", hr === h2 ? "ok" : "ng",
+          (hr === h2 ? "替換後 SHA-256 一致 " : "替換後 SHA-256 不一致 ") + hr.slice(0, 16) + "…，耗時 " + ms + " ms");
+      });
+    }).then(function () {
+      // 不覆寫：建立已存在檔名時應能偵測
+      return sub.getFileHandle("probe.json", { create: false }).then(function () {
+        add("偵測已存在檔案", "ok", "可在寫入前檢查檔名是否已存在（版本檔一次寫入、不覆寫）");
+      });
+    }).then(function () {
+      return listNames(sub).then(function (names) {
+        var extra = names.filter(function (n) { return n !== "probe.json"; });
+        add("列出資料夾內容", "ok", "共 " + names.length + " 個項目" + (extra.length ? "（另有暫存：" + extra.join("、") + "）" : ""));
+      });
+    }).then(function () {
+      return sub.removeEntry("probe.json").then(function () {
+        add("刪除測試檔", "ok", "removeEntry 成功");
+      });
+    }).then(function () {
+      return dir.removeEntry(subName, { recursive: true }).then(function () {
+        add("刪除暫存子資料夾", "ok", "已清除，資料夾恢復原狀");
+      });
+    }).then(function () {
+      add("資料夾寫入測試（總結）", "ok", "可讀寫：可提供編輯模式");
+      setStatus("資料夾測試完成。");
+    }).catch(function (e) {
+      add("資料夾寫入測試（總結）", "ng", "失敗：" + errText(e) + "（只提供查詢模式）");
+      setStatus("資料夾測試失敗：" + errText(e));
+      if (sub) {
+        return dir.removeEntry(subName, { recursive: true }).catch(function (e2) {
+          add("刪除暫存子資料夾", "warn", "未能清除「" + subName + "」，請手動刪除：" + errText(e2));
+        });
+      }
+    });
+  }
+
+  function listNames(d) {
+    var names = [];
+    if (typeof d.keys !== "function") { return Promise.resolve(names); }
+    var it = d.keys();
+    function step() {
+      return it.next().then(function (r) {
+        if (r.done) { return names; }
+        names.push(r.value);
+        return step();
+      });
+    }
+    return step();
+  }
+
+  // ---------- 兩分頁鎖 ----------
+  function lockTest() {
+    if (!(navigator.locks && navigator.locks.request)) { add("兩分頁鎖（H04參考）", "warn", "navigator.locks 不可用"); return; }
+    if (lockRelease) {
+      lockRelease();
+      lockRelease = null;
+      $("btnLock").textContent = "兩分頁鎖測試";
+      add("兩分頁鎖（H04參考）", "ok", "本分頁已釋放鎖");
+      return;
+    }
+    navigator.locks.request(LOCK_NAME, { ifAvailable: true }, function (lock) {
+      if (!lock) {
+        add("兩分頁鎖（H04參考）", "ok", "鎖已被另一分頁持有：本分頁取不到（符合預期，正式程式此時為唯讀）");
+        return null;
+      }
+      add("兩分頁鎖（H04參考）", "ok", "本分頁取得鎖。請另開一分頁開啟本檔再按此鈕，應顯示取不到；再按一次本鈕釋放");
+      $("btnLock").textContent = "釋放兩分頁鎖";
+      return new Promise(function (resolve) { lockRelease = resolve; });
+    }).catch(function (e) { add("兩分頁鎖（H04參考）", "ng", errText(e)); });
+  }
+
+  // ---------- 背景計時 ----------
+  function timerTest() {
+    var btn = $("btnTimer");
+    btn.disabled = true;
+    var expected = 5000, n = 24, count = 0, maxGap = 0, hiddenTicks = 0;
+    var last = Date.now();
+    add("背景計時（H22參考）", "skip", "執行中：每5秒一次，共2分鐘。可將分頁切到背景或最小化視窗");
+    var id = setInterval(function () {
+      var now = Date.now(), gap = now - last;
+      last = now;
+      count++;
+      if (gap > maxGap) { maxGap = gap; }
+      if (document.hidden) { hiddenTicks++; }
+      if (count >= n) {
+        clearInterval(id);
+        btn.disabled = false;
+        add("背景計時（H22參考）", maxGap < 60000 ? "ok" : "warn",
+          "預定間隔 " + expected / 1000 + " 秒，實際最大間隔 " + (maxGap / 1000).toFixed(1) + " 秒；背景期間觸發 " + hiddenTicks + " 次" +
+          (maxGap < 60000 ? "（心跳30秒、逾時5分鐘可容許）" : "（背景降頻嚴重，須評估心跳設定）"));
+      }
+    }, expected);
+  }
+
+  // ---------- 下載 ----------
+  function stampName() {
+    var d = new Date();
+    return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "-" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+  }
+
+  function downloadTest() {
+    try {
+      var blob = new Blob(["﻿" + textReport()], { type: "text/plain;charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "特藥_探針結果_" + stampName() + ".txt";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+      add("下載測試", "ok", "已觸發下載「" + a.download + "」；請確認下載列是否出現、檔名中文是否正確、防毒是否攔截");
+    } catch (e) {
+      add("下載測試", "ng", errText(e));
+    }
+  }
+
+  function saveAsTest() {
+    if (typeof window.showSaveFilePicker !== "function") { add("另存對話框測試", "warn", "showSaveFilePicker 不可用：匯出將改用下載"); return; }
+    var name = "特藥_探針結果_" + stampName() + ".txt";
+    window.showSaveFilePicker({ suggestedName: name, types: [{ description: "文字檔", accept: { "text/plain": [".txt"] } }] })
+      .then(function (fh) {
+        return writeText(fh, "﻿" + textReport()).then(function () {
+          add("另存對話框測試", "ok", "已存為「" + fh.name + "」（預設檔名：" + name + "）");
+        });
+      }).catch(function (e) {
+        if (e && e.name === "AbortError") { add("另存對話框測試", "skip", "使用者取消"); return; }
+        add("另存對話框測試", "ng", errText(e));
+      });
+  }
+
+  // ---------- 複製 ----------
+  function copyText() {
+    var text = textReport();
+    $("out").value = text;
+    var fallback = function (why) {
+      var ta = $("out");
+      ta.focus();
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      setStatus(ok ? "已複製（備援方式）。" : "無法自動複製" + (why ? "（" + why + "）" : "") + "：文字已選取，請按 Ctrl+C。");
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { setStatus("已複製結果文字。"); }, function (e) { fallback(errText(e)); });
+    } else {
+      fallback("Clipboard API 不可用");
+    }
+  }
+
+  $("btnBasic").addEventListener("click", function () { runBasic(); });
+  $("btnFolder").addEventListener("click", pickFolder);
+  $("btnRemembered").addEventListener("click", useRemembered);
+  $("btnLock").addEventListener("click", lockTest);
+  $("btnTimer").addEventListener("click", timerTest);
+  $("btnDownload").addEventListener("click", downloadTest);
+  $("btnSaveAs").addEventListener("click", saveAsTest);
+  $("btnCopy").addEventListener("click", copyText);
+  $("tester").addEventListener("input", render);
+  $("pc").addEventListener("input", render);
+
+  window.addEventListener("error", function (e) { add("未預期錯誤", "ng", (e.message || "") + " @" + (e.lineno || "")); });
+  window.addEventListener("unhandledrejection", function (e) { add("未預期錯誤（Promise）", "ng", errText(e.reason)); });
+
+  runBasic();
+})();
+</script>
+</body>
+</html>
