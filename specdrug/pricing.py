@@ -10,7 +10,7 @@ from .cases import drug_followup_basis
 from .core import (BizError, Ctx, ROLE_CLERK, ROLE_REVIEWER, audit, get, insert, op_record, op_seen,
                    update)
 from .db import get_setting
-from .recognition import revision_scope
+from .recognition import current_rule_hash, revision_scope
 from .util import dec_text, normalize_code, parse_date, today, utc_now
 
 EDIT_ROLES = (ROLE_CLERK, ROLE_REVIEWER)
@@ -138,8 +138,9 @@ def create_price_action(ctx: Ctx, *, revision_id, drug_code, case_id=None, contr
         if v not in (None, "") and dec_text(v) is None:
             raise BizError(f"{label}無法解析為金額。")
     snap = ctx.con.execute("SELECT ss.id FROM scope_snapshot ss JOIN scope_member sm ON sm.snapshot_id=ss.id"
-                           " WHERE ss.revision_id=? AND ss.status='已確認' AND sm.drug_code=?"
-                           " ORDER BY ss.confirmed_at DESC LIMIT 1", (revision_id, code)).fetchone()
+                           " WHERE ss.revision_id=? AND ss.status='已確認' AND ss.rule_hash IS ? AND sm.drug_code=?"
+                           " ORDER BY ss.confirmed_at DESC LIMIT 1",
+                           (revision_id, current_rule_hash(ctx.con, revision_id), code)).fetchone()
     with ctx.tx():
         return insert(ctx, "price_action", dict(
             case_id=case_id, drug_code=code, revision_id=revision_id, snapshot_id=snap[0] if snap else None,
@@ -363,7 +364,8 @@ def generate_diff_todos(ctx: Ctx, new_import_id) -> int:
                 continue
             snap_groups = {r[0]: r[1] for r in ctx.con.execute(
                 "SELECT sm.drug_code, sm.group_code FROM scope_member sm JOIN scope_snapshot ss ON ss.id=sm.snapshot_id"
-                " WHERE ss.revision_id=? AND ss.status='已確認'", (rev["id"],))}
+                " WHERE ss.revision_id=? AND ss.status='已確認' AND ss.rule_hash IS ?",
+                (rev["id"], current_rule_hash(ctx.con, rev["id"])))}
             for code, d in master.items():
                 res, path = ev.evaluate(rule, d)
                 if code not in scope and res != "不符合":

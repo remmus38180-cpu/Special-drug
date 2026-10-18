@@ -290,16 +290,25 @@ def snapshot_members(con, snapshot_id) -> list[dict]:
         " OR manual_result='納入') ORDER BY drug_code", (snapshot_id,))]
 
 
+def current_rule_hash(con, revision_id) -> str | None:
+    """版本目前規則的雜湊；未設定規則為None。"""
+    row = con.execute("SELECT rule_json FROM recognition_revision WHERE id=?", (revision_id,)).fetchone()
+    return rules.rule_hash(json.loads(row[0])) if row and row[0] else None
+
+
 def confirmed_snapshot(con, revision_id):
-    row = con.execute("SELECT * FROM scope_snapshot WHERE revision_id=? AND status='已確認'"
-                      " ORDER BY confirmed_at DESC LIMIT 1", (revision_id,)).fetchone()
+    """與目前規則一致的最新已確認快照；規則變更後的舊快照不採用。"""
+    row = con.execute("SELECT * FROM scope_snapshot WHERE revision_id=? AND status='已確認' AND rule_hash IS ?"
+                      " ORDER BY confirmed_at DESC LIMIT 1",
+                      (revision_id, current_rule_hash(con, revision_id))).fetchone()
     return dict(row) if row else None
 
 
 def revision_scope(con, revision_id) -> set:
-    """版本的認定範圍代碼：所有已確認快照之聯集（新符合經確認後形成新快照）。"""
+    """版本的認定範圍代碼：與目前規則一致的已確認快照之聯集（新符合經確認後形成新快照）。"""
     codes = set()
-    for s in con.execute("SELECT id FROM scope_snapshot WHERE revision_id=? AND status='已確認'", (revision_id,)):
+    for s in con.execute("SELECT id FROM scope_snapshot WHERE revision_id=? AND status='已確認' AND rule_hash IS ?",
+                         (revision_id, current_rule_hash(con, revision_id))):
         codes |= {m["drug_code"] for m in snapshot_members(con, s[0])}
     return codes
 
@@ -321,6 +330,10 @@ def confirm_revision(ctx: Ctx, revision_id, *, op_id=None, conflict_basis=None) 
         if rev["rule_json"] and rev["category"] != "取消認定":
             snap = confirmed_snapshot(ctx.con, revision_id)
             if not snap:
+                if ctx.con.execute("SELECT 1 FROM scope_snapshot WHERE revision_id=? AND status='已確認'",
+                                   (revision_id,)).fetchone():
+                    raise BizError("已確認快照的規則雜湊與目前規則不一致（預覽後規則已變更），"
+                                   "請重新預覽並確認新快照後再確認認定。")
                 raise BizError("適用條件尚未確認範圍名單（快照），不能確認認定。")
         conflicts = category_conflicts(ctx.con, revision_id)
         if conflicts and not conflict_basis:
