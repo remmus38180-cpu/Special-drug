@@ -41,6 +41,11 @@ class Ctx:
         if not (self.roles & set(roles)):
             raise PermissionDenied(f"帳號 {self.actor} 無「{'／'.join(roles)}」權限。")
 
+    def require_role(self, *roles: str) -> None:
+        """只檢查角色（不要求編輯權），供查詢模式可用之管理或下載功能。"""
+        if not (self.roles & set(roles)):
+            raise PermissionDenied(f"帳號 {self.actor} 無「{'／'.join(roles)}」權限。")
+
     def tx(self):
         return Tx(self.con)
 

@@ -396,11 +396,11 @@ def test_T22_backup_restore(tmp_path):
     f.write_bytes(b"content")
     add_attachment(ctx, f, "case_record", cid, ws.pending_dir)
     rid1 = ws.publish()
-    bk = s.backup(rid1)
+    bk = s.backup(rid1, ctx=ws.ctx())
     assert verify_backup(bk) == []
     C.create_case(ws.ctx(), subject="之後的案")
     ws.publish()
-    rid3 = s.restore(ws.lock, bk, operator="admin", reason="演練", op_id="restore-1")
+    rid3 = s.restore(ws.lock, bk, ctx=ws.ctx(), reason="演練", op_id="restore-1")
     assert s.current()["release_id"] == rid3 and s.verify_release(rid3)
     assert (s.releases / rid1).exists()  # 歷史release未被改寫
     ws.end_edit("discard")

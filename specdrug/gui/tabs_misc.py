@@ -11,7 +11,7 @@ from .. import migration as MG
 from .. import pricing as P
 from ..attachments import add_attachment
 from ..auth import set_setting, set_user
-from ..core import ALL_ROLES
+from ..core import ALL_ROLES, ROLE_ADMIN
 from ..query import drug_detail, search_drugs
 from ..store import environment_check, verify_backup
 from ..util import new_id, to_taipei
@@ -477,7 +477,17 @@ class AdminTab(ttk.Frame):
             rows.append(x)
         self.table.set_rows(rows)
 
+    def _admin(self):
+        """管理功能限「管理者」角色；權限仍由業務／發布模組再檢查，不僅隱藏按鈕。"""
+        ctx = self.app.ctx()
+        if ROLE_ADMIN not in ctx.roles:
+            W.error(self, f"帳號 {ctx.actor} 無「管理者」權限。")
+            return None
+        return ctx
+
     def users(self):
+        if not self._admin():
+            return
         users = self.app.con.execute("SELECT * FROM app_user ORDER BY account").fetchall()
         txt = "；".join(f"{u['account']}:{u['roles']}{'' if u['active'] else '(停用)'}" for u in users)
         fields = [("account", "帳號（作業系統帳號）*", "text"), ("display_name", "顯示名稱", "text")]
@@ -489,6 +499,8 @@ class AdminTab(ttk.Frame):
                                               v["display_name"], bool(v["active"])))
 
     def settings(self):
+        if not self._admin():
+            return
         from ..db import DEFAULT_SETTINGS
         cur = {r[0]: r[1] for r in self.app.con.execute("SELECT key, value FROM settings")}
         fields = [(k, k, "text") for k in DEFAULT_SETTINGS]
@@ -507,8 +519,13 @@ class AdminTab(ttk.Frame):
         return self.app.ws.store
 
     def envcheck(self):
+        ctx = self._admin()
+        if not ctx:
+            return
         if self.app.ws.store:
-            res = self.app.ws.store.verify_environment()
+            res = self.app.run(self.app.ws.store.verify_environment, ctx=ctx)
+            if res is None:
+                return
         else:
             root = filedialog.askdirectory(parent=self, title="選共用槽測試目錄")
             if not root:
@@ -520,12 +537,15 @@ class AdminTab(ttk.Frame):
 
     def backup(self):
         s = self._store()
-        if s:
-            p = self.app.run(s.backup)
+        ctx = self._admin() if s else None
+        if ctx:
+            p = self.app.run(s.backup, ctx=ctx)
             if p:
                 W.info(self, f"已備份並驗證：{p}")
 
     def verify(self):
+        if not self._admin():
+            return
         d = filedialog.askdirectory(parent=self, title="選備份資料夾")
         if d:
             probs = verify_backup(Path(d))
@@ -538,10 +558,13 @@ class AdminTab(ttk.Frame):
         if not self.app.ws.editing:
             W.error(self, "還原須先取得編輯權。")
             return
+        if not self._admin():
+            return
         d = filedialog.askdirectory(parent=self, title="選備份資料夾")
         v = W.form(self, "還原（以新發布版本引用舊內容）", [("reason", "還原原因*", "long")]) if d else None
         if v:
-            rid = self.app.run(s.restore, self.app.ws.lock, Path(d), operator=self.app.ws.account, reason=v["reason"], op_id=new_id())
+            rid = self.app.run(s.restore, self.app.ws.lock, Path(d), ctx=self.app.ctx(), reason=v["reason"],
+                               op_id=new_id())
             if rid:
                 W.info(self, f"已還原為新版本 {rid}。請結束編輯並重新開始以載入。")
 

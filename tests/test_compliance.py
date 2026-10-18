@@ -35,3 +35,40 @@ def test_qty_known_units_without_conversion(op, expected):
     ev = rules.Evaluator(["ML", "GM"], {})
     res, _ = ev.evaluate({"field": "spec", "op": op, "value": "5", "unit": "ML"}, {"spec_qty": "5", "spec_unit": "GM"})
     assert res == expected
+
+
+# ---------------- §5 管理功能限管理者 ----------------
+
+def _shared(tmp_path):
+    from specdrug.store import SharedStore
+    from specdrug.workspace import Workspace
+    s = SharedStore(tmp_path / "share")
+    s.init("admin")
+    ws = Workspace(tmp_path / "loc", s.root, "admin")
+    ws.refresh_view()
+    return s, ws
+
+
+def test_admin_only_backup_restore_envcheck(tmp_path):
+    from specdrug.auth import set_user
+    from specdrug.core import Ctx, PermissionDenied, ROLE_CLERK, ROLE_REVIEWER, ROLE_VIEWER
+    s, ws = _shared(tmp_path)
+    ws.start_edit()
+    set_user(ws.ctx(), "clerk", [ROLE_CLERK, ROLE_REVIEWER])
+    rid = ws.publish()
+    clerk = Ctx(ws.con, "clerk", {ROLE_CLERK, ROLE_REVIEWER}, True)
+    viewer = Ctx(ws.con, "viewer", {ROLE_VIEWER}, False)
+    for c in (clerk, viewer):
+        with pytest.raises(PermissionDenied):
+            s.backup(rid, ctx=c)
+        with pytest.raises(PermissionDenied):
+            s.verify_environment(ctx=c)
+    bk = s.backup(rid, ctx=ws.ctx())
+    assert s.verify_environment(ctx=ws.ctx())["通過"]
+    with pytest.raises(PermissionDenied):
+        s.restore(ws.lock, bk, ctx=clerk, reason="x", op_id="r-clerk")
+    with pytest.raises(PermissionDenied):  # 空角色不得還原
+        s.restore(ws.lock, bk, ctx=Ctx(ws.con, "admin", set(), True), reason="x", op_id="r-empty")
+    rid2 = s.restore(ws.lock, bk, ctx=ws.ctx(), reason="演練", op_id="r-admin")
+    assert s.current()["release_id"] == rid2
+    ws.close()

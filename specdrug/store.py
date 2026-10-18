@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .core import ROLE_ADMIN, Ctx, audit
 from .db import SCHEMA_VERSION, open_db
 from .util import new_id, sha256_file, utc_now
 
@@ -136,8 +137,12 @@ class SharedStore:
         r = _read_json(self.control / "environment.json")
         return bool(r and r.get("通過"))
 
-    def verify_environment(self) -> dict:
-        """執行並記錄環境驗證；未通過時正式編輯模式停用。"""
+    def verify_environment(self, *, ctx: Ctx) -> dict:
+        """執行並記錄環境驗證；未通過時正式編輯模式停用。限管理者。"""
+        ctx.require_role(ROLE_ADMIN)
+        return self._record_environment()
+
+    def _record_environment(self) -> dict:
         res = environment_check(self.root)
         res["檢查時間"] = utc_now()
         res["主機"] = socket.gethostname()
@@ -150,7 +155,7 @@ class SharedStore:
         (self.control / "edit.lock").touch(exist_ok=True)
         if self.current():
             raise StoreError("共用槽已初始化。")
-        env = self.verify_environment()
+        env = self._record_environment()  # 初始化時尚無帳號資料；初始化者即成為管理者
         if not env.get("通過"):
             raise StoreError("共用槽不支援可靠鎖定或不可分割替換，不能初始化正式共用版：" + json.dumps(env, ensure_ascii=False))
         lock = self.acquire_lock(admin_account)
@@ -338,7 +343,9 @@ class SharedStore:
         return sorted(out, key=lambda m: m["at"])
 
     # ---------- 備份還原 ----------
-    def backup(self, rid=None, dest: Path | None = None) -> Path:
+    def backup(self, rid=None, dest: Path | None = None, *, ctx: Ctx) -> Path:
+        """限管理者。"""
+        ctx.require_role(ROLE_ADMIN)
         rid = rid or self.current()["release_id"]
         m = self.verify_release(rid)
         dest = dest or (self.backups / f"backup-{rid}-{new_id()[:6]}")
@@ -361,8 +368,10 @@ class SharedStore:
             raise StoreError("備份驗證失敗：" + "；".join(problems))
         return dest
 
-    def restore(self, lock: EditLock, backup_dir: Path, *, operator, reason, op_id) -> str:
-        """以新發布版本引用舊內容；不改寫歷史release。"""
+    def restore(self, lock: EditLock, backup_dir: Path, *, ctx: Ctx, reason, op_id) -> str:
+        """以新發布版本引用舊內容；不改寫歷史release。限取得編輯權之管理者。"""
+        ctx.require(ROLE_ADMIN)
+        operator = ctx.actor
         if not reason:
             raise StoreError("還原須填寫原因。")
         problems = verify_backup(backup_dir)
@@ -375,10 +384,9 @@ class SharedStore:
             db = work / "restore.sqlite"
             shutil.copyfile(backup_dir / "data.sqlite", db)
             con = open_db(db)
-            from .core import Ctx, audit
-            ctx = Ctx(con, operator, set(), True)
+            rctx = Ctx(con, operator, set(ctx.roles), True, request_id=op_id)
             src = json.loads((backup_dir / "backup_manifest.json").read_text(encoding="utf-8"))
-            audit(ctx, "release", src["release_id"], "還原", reason=f"{reason}（自備份 {backup_dir.name}）")
+            audit(rctx, "release", src["release_id"], "還原", reason=f"{reason}（自備份 {backup_dir.name}）")
             con.close()
             return self.publish(lock, db, base_release_id=cur["release_id"] if cur else None, op_id=op_id,
                                 operator=operator, pending_attach_dir=backup_dir / "attachments")
