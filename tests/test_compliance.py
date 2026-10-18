@@ -234,3 +234,31 @@ def test_historical_category_names_removed(ctx):
     rev = R.create_revision(ctx, rec, category="特殊藥品")
     with pytest.raises(BizError, match="類別"):
         R.update_revision(ctx, rev, {"category": "必要藥品"})
+
+
+# ---------------- 次要：Excel移轉 ----------------
+
+def _workbook(tmp_path, rows, name="w.xlsx"):
+    import openpyxl
+    from specdrug import migration as MG
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "final"
+    ws.append([MG.COLS[k] for k in MG.COLS])
+    base = {k: None for k in MG.COLS}
+    for r in rows:
+        ws.append([dict(base, **r)[k] for k in MG.COLS])
+    wb.save(tmp_path / name)
+    return tmp_path / name
+
+
+def test_migration_expert_meeting_is_expert_advice(ctx, tmp_path):
+    from specdrug import cases as C
+    from specdrug import migration as MG
+    p = _workbook(tmp_path, [dict(seq="1", group_code="G1", category="特殊藥品", rule="分組代碼=G1",
+                                  history="專家會議113年3月\n擬訂會議113年8月")])
+    MG.stage_workbook(ctx, p)
+    res = MG.commit_row(ctx, MG.list_rows(ctx.con)[0]["id"])
+    tl = C.case_timeline(ctx.con, res["case_id"])
+    assert [(a["meeting_type"], a["decisions"][0]["nature"]) for a in tl] == [("專家", "專家建議"),
+                                                                              ("共同擬訂", "會議決議")]

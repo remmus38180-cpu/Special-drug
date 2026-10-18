@@ -261,7 +261,8 @@ def commit_row(ctx: Ctx, row_id, *, merge_into_recognition_id=None, rule_overrid
             ag = add_agenda(ctx, meeting_id=mid, case_id=case_id, agenda_no=None,
                             subject=title, original_text=m["original"],
                             discussion=f"移轉候選議案（第{i}次）；決議內容須由價格異動歷程人工拆解")
-            add_decision(ctx, agenda_id=ag, nature="會議決議", result="待確認",
+            # 專家會議僅為專家建議，不當作會議決議（B14）
+            add_decision(ctx, agenda_id=ag, nature="專家建議" if m["type"] == "專家" else "會議決議", result="待確認",
                          result_text="歷史移轉：結果待人工依原文確認")
         if p.get("not_recognized"):
             result["recognition"] = None
