@@ -409,3 +409,26 @@ def test_B17_pending_contract_requirement_confirmable_marked_incomplete(ctx, mas
     row = ctx.con.execute("SELECT confirm_status, completeness FROM price_action WHERE id=?", (pa,)).fetchone()
     assert tuple(row) == ("已確認", "不完整")
 
+
+def test_B18_contract_dates_not_checked_but_item_period_is(ctx, master):
+    from specdrug import pricing as P
+    rev = _scoped_rev(ctx, master)
+    # 合約本身已到期（到期日早於調高生效日）仍可確認
+    c1 = P.create_contract(ctx, contract_no="K-old", status="完成簽署", signed_date="2020-01-01",
+                           effective_from="2020-01-01", expiry_date="2021-01-01", drugs=["B000004100"])
+    pa1 = P.create_price_action(ctx, revision_id=rev, drug_code="B000004100", contract_requirement="須簽約",
+                                contract_id=c1, **_READY)
+    assert P.validate_price_action(ctx.con, R.get(ctx.con, "price_action", pa1)) == []
+    # 合約品項適用起訖日不涵蓋調高生效日：仍列缺件
+    c2 = P.create_contract(ctx, contract_no="K-item", status="完成簽署", signed_date="2020-01-01",
+                           drugs=[{"drug_code": "B000004100", "effective_from": "2020-01-01",
+                                   "effective_to": "2021-01-01"}])
+    pa2 = P.create_price_action(ctx, revision_id=rev, drug_code="B000004100", contract_requirement="須簽約",
+                                contract_id=c2, **_READY)
+    errs = P.validate_price_action(ctx.con, R.get(ctx.con, "price_action", pa2))
+    assert any("適用期間" in e for e in errs)
+    # 仍須完成簽署
+    c3 = P.create_contract(ctx, contract_no="K-draft", status="辦理中", drugs=["B000004100"])
+    pa3 = P.create_price_action(ctx, revision_id=rev, drug_code="B000004100", contract_requirement="須簽約",
+                                contract_id=c3, **_READY)
+    assert any("未完成簽署" in e for e in P.validate_price_action(ctx.con, R.get(ctx.con, "price_action", pa3)))
