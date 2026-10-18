@@ -153,3 +153,69 @@ def test_diff_todos_skip_rule_with_unmapped_field(ctx, master, tmp_path):
     assert kinds == ["規則停用"]
     detail = ctx.con.execute("SELECT detail FROM review_item").fetchone()[0]
     assert "atc_code" in detail
+
+
+# ---------------- §5、§9.1-3、T15、T22 附件下載與入口 ----------------
+
+def test_viewer_downloads_attachment_with_hash_check(tmp_path):
+    from specdrug import cases as C
+    from specdrug.attachments import add_attachment, fetch_attachment
+    from specdrug.auth import set_user
+    from specdrug.core import Ctx, PermissionDenied, ROLE_VIEWER
+    from specdrug.store import StoreError
+    from specdrug.workspace import Workspace
+    s, ws = _shared(tmp_path)
+    ws.start_edit()
+    set_user(ws.ctx(), "viewer", [ROLE_VIEWER])
+    cid = C.create_case(ws.ctx(), subject="附件案")
+    f = tmp_path / "決議.pdf"
+    f.write_bytes(b"minutes")
+    aid = add_attachment(ws.ctx(), f, "case_record", cid, ws.pending_dir)
+    # 編輯者發布前可由本機待上傳區取得
+    assert ws.fetch_attachment(aid, tmp_path / "pre.pdf").read_bytes() == b"minutes"
+    ws.publish()
+    ws.end_edit("keep")
+    q = Workspace(tmp_path / "q", s.root, "viewer")
+    q.refresh_view()
+    assert not q.editing
+    out = q.fetch_attachment(aid, tmp_path / "dl" / "x.pdf")
+    assert out.read_bytes() == b"minutes"
+    # 無角色帳號不得下載
+    with pytest.raises(PermissionDenied):
+        fetch_attachment(Ctx(q.con, "nobody", set(), False), aid, tmp_path / "n.pdf", store=s)
+    # 共用槽檔案遭竄改→雜湊不符，不留下壞檔
+    a = q.con.execute("SELECT storage_key FROM attachment WHERE id=?", (aid,)).fetchone()
+    (s.attachments / a[0]).write_bytes(b"tampered")
+    dest = tmp_path / "bad.pdf"
+    with pytest.raises(StoreError, match="雜湊不符"):
+        q.fetch_attachment(aid, dest)
+    assert not dest.exists()
+    q.close()
+    ws.close()
+
+
+def test_attachment_targets_for_decision_agenda_revision_price(ctx, master, tmp_path):
+    from specdrug import cases as C
+    from specdrug import pricing as P
+    from specdrug.attachments import add_attachment, attachment_targets, attachments_of
+    cid = C.create_case(ctx, subject="入口案", drugs=["B000004100"])
+    mid = C.create_meeting(ctx, meeting_type="專家", name="專家會議", meeting_date="2026-05-01")
+    ag = C.add_agenda(ctx, meeting_id=mid, case_id=cid)
+    dec = C.add_decision(ctx, agenda_id=ag, nature="專家建議", result="同意")
+    t = attachment_targets(ctx.con, "case_record", cid)
+    assert [(e, i) for e, i, _ in t] == [("case_record", cid), ("meeting_agenda", ag), ("decision", dec)]
+    assert [(e, i) for e, i, _ in attachment_targets(ctx.con, "meeting", mid)] == [
+        ("meeting", mid), ("meeting_agenda", ag), ("decision", dec)]
+    rec = R.create_recognition(ctx, name="附件認定")
+    rev = R.create_revision(ctx, rec, category="特殊藥品", rule=B4, effective_from="2020-01-01", decision_ids=[dec])
+    R.confirm_snapshot(ctx, R.save_snapshot(ctx, rev, master))
+    R.confirm_revision(ctx, rev)
+    assert [(e, i) for e, i, _ in attachment_targets(ctx.con, "recognition_revision", rev)] == [
+        ("recognition_revision", rev), ("decision", dec)]
+    pa = P.create_price_action(ctx, revision_id=rev, drug_code="B000004100")
+    assert [(e, i) for e, i, _ in attachment_targets(ctx.con, "price_action", pa)] == [("price_action", pa)]
+    f = tmp_path / "a.pdf"
+    f.write_bytes(b"x")
+    for e, i in (("decision", dec), ("meeting_agenda", ag), ("recognition_revision", rev), ("price_action", pa)):
+        add_attachment(ctx, f, e, i, tmp_path / "pending")
+        assert len(attachments_of(ctx.con, e, i)) == 1

@@ -9,13 +9,13 @@ from tkinter import filedialog, ttk
 from .. import master_import as M
 from .. import migration as MG
 from .. import pricing as P
-from ..attachments import add_attachment
 from ..auth import set_setting, set_user
 from ..core import ALL_ROLES, ROLE_ADMIN
 from ..query import drug_detail, search_drugs
 from ..store import environment_check, verify_backup
 from ..util import new_id, to_taipei
 from . import widgets as W
+from .attach import open_dialog
 
 
 class ContractTab(ttk.Frame):
@@ -25,7 +25,7 @@ class ContractTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x")
         for t, cmd in (("新增合約", self.new), ("補充協議／新版", self.supplement), ("修改", self.edit),
-                       ("加入品項", self.add_drug), ("上傳文件", self.attach), ("到期提醒", self.alerts),
+                       ("加入品項", self.add_drug), ("文件（開啟／另存／上傳）", self.attach), ("到期提醒", self.alerts),
                        ("匯出", lambda: self.table.export(self.app.con, "合約清單"))):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=1)
         pw = ttk.PanedWindow(self, orient="vertical")
@@ -101,11 +101,7 @@ class ContractTab(ttk.Frame):
         c = self.table.one(self)
         if not c:
             return
-        path = filedialog.askopenfilename(parent=self)
-        if path:
-            self.app.run(add_attachment, self.app.ctx(), path, "contract", c["id"], self.app.ws.pending_dir,
-                         ok="合約文件已加入（新版本不覆蓋舊檔）。")
-            self.show([c])
+        open_dialog(self, self.app, "contract", c["id"])
 
     def alerts(self):
         rows = P.contract_alerts(self.app.con)

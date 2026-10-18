@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import ttk
 
 from .. import cases as C
-from ..attachments import add_attachment, attachments_of
+from ..attachments import attachments_of
 from ..util import to_taipei
 from . import widgets as W
+from .attach import open_dialog
 
 
 class CaseTab(ttk.Frame):
@@ -30,7 +31,7 @@ class CaseTab(ttk.Frame):
         ttk.Button(top, text="查詢", command=self.refresh).pack(side="left", padx=4)
         for t, cmd in (("新增案件", self.new_case), ("修改", self.edit_case), ("新增品項", self.add_drug),
                        ("登錄提會", self.add_agenda), ("登錄決議", self.add_decision), ("結果摘要", self.set_summary),
-                       ("結案", self.close_case), ("再提新案", self.reopen), ("附件", self.attach),
+                       ("結案", self.close_case), ("再提新案", self.reopen), ("附件（案件／議案／決議）", self.attach),
                        ("匯出", lambda: self.table.export(self.app.con, "案件清單"))):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=1)
         pw = ttk.PanedWindow(self, orient="vertical")
@@ -224,10 +225,7 @@ class CaseTab(ttk.Frame):
         c = self._case()
         if not c:
             return
-        path = filedialog.askopenfilename(parent=self)
-        if path and self.app.run(add_attachment, self.app.ctx(), path, "case_record", c["id"], self.app.ws.pending_dir,
-                                 ok="附件已加入（發布後他人可取得）。"):
-            self.show_detail([c])
+        open_dialog(self, self.app, "case_record", c["id"])
 
 
 class MeetingTab(ttk.Frame):
@@ -237,7 +235,7 @@ class MeetingTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x")
         ttk.Button(top, text="新增會議", command=self.new).pack(side="left")
-        ttk.Button(top, text="附件（紀錄文件）", command=self.attach).pack(side="left")
+        ttk.Button(top, text="附件（紀錄文件／議案／決議）", command=self.attach).pack(side="left")
         ttk.Button(top, text="匯出", command=lambda: self.table.export(self.app.con, "會議清單")).pack(side="left")
         pw = ttk.PanedWindow(self, orient="vertical")
         pw.pack(fill="both", expand=True)
@@ -276,7 +274,4 @@ class MeetingTab(ttk.Frame):
         m = self.table.one(self)
         if not m:
             return
-        path = filedialog.askopenfilename(parent=self)
-        if path:
-            self.app.run(add_attachment, self.app.ctx(), path, "meeting", m["id"], self.app.ws.pending_dir,
-                         ok="附件已加入。")
+        open_dialog(self, self.app, "meeting", m["id"])

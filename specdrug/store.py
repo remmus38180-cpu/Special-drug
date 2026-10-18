@@ -326,12 +326,7 @@ class SharedStore:
         src = storage_path(self.attachments, key)
         if not src.exists():
             raise StoreError("附件不存在或共用槽無法存取。")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dest)
-        if sha256_file(dest) != sha:
-            dest.unlink(missing_ok=True)
-            raise StoreError("附件雜湊不符。")
-        return dest
+        return copy_verified(src, sha, dest)
 
     def list_releases(self) -> list[dict]:
         out = []
@@ -408,6 +403,21 @@ class SharedStore:
             n = con.total_changes
             con.executemany(f"INSERT OR IGNORE INTO audit_event({cols}) VALUES (?,?,?,?,?,?,?,?,?)", rows)
             return con.total_changes - n
+
+
+def copy_verified(src: Path, sha: str, dest: Path) -> Path:
+    """複製到暫存檔並驗證SHA-256後才換成目的檔；不符時不留下或覆蓋目的檔。"""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{new_id()}.tmp")
+    try:
+        shutil.copyfile(src, tmp)
+        if sha256_file(tmp) != sha:
+            raise StoreError("附件雜湊不符，未取得檔案；請通知管理者核對共用槽附件。")
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return dest
 
 
 def verify_backup(dest: Path) -> list[str]:

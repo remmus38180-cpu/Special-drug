@@ -166,6 +166,11 @@ class Workspace:
                            {"base": rid, "op_id": new_id(), "started_at": utc_now(), "account": self.account})
         return rid
 
+    def fetch_attachment(self, attachment_id, dest) -> Path:
+        """開啟／另存附件（驗證雜湊）；查詢模式依角色可下載。"""
+        from .attachments import fetch_attachment
+        return fetch_attachment(self.ctx(), attachment_id, dest, store=self.store, pending_dir=self.pending_dir)
+
     def lock_valid(self) -> bool:
         return bool(self.lock and self.lock.valid())
 

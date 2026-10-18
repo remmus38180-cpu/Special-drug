@@ -12,6 +12,7 @@ from .. import rules
 from ..master_import import active_import_id, options
 from ..util import new_id
 from . import widgets as W
+from .attach import open_dialog
 
 TEMPLATES = {
     "依分組": {"op": "or", "children": []},
@@ -417,7 +418,7 @@ class RecognitionTab(ttk.Frame):
         for t, cmd in (("新增認定", self.new_rec), ("新增版本", self.new_rev), ("更正版本", self.correct_rev),
                        ("規則編輯／預覽", self.edit_rule), ("建立快照", self.snapshot), ("快照名單", self.open_snapshot),
                        ("送待確認", self.submit), ("確認版本", self.confirm), ("撤銷版本", self.withdraw),
-                       ("分組調價方式", self.group_treatment),
+                       ("分組調價方式", self.group_treatment), ("版本附件", self.attach),
                        ("匯出", lambda: self.table.export(self.app.con, "認定清單"))):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=1)
         pw = ttk.PanedWindow(self, orient="vertical")
@@ -474,6 +475,11 @@ class RecognitionTab(ttk.Frame):
             txt.append(f"分組 {g['group_code']}：{g['method']}（{'部分涵蓋' if g['partial_cover'] else '全組'}）"
                        f" {g['effective_from'] or '起日待確認'} {g['confirm_status']}")
         self.detail.insert("1.0", "\n".join(txt))
+
+    def attach(self):
+        r = self._rev()
+        if r:
+            open_dialog(self, self.app, "recognition_revision", r["id"])
 
     def _rec(self):
         return self.table.one(self)
@@ -614,7 +620,8 @@ class AnnounceTab(ttk.Frame):
         self.rev_box.pack(side="left")
         self.rev_box.bind("<<ComboboxSelected>>", lambda e: self.load())
         for t, cmd in (("勾選品項建立調高", self.create_actions), ("修改調高", self.edit_action),
-                       ("建立註記", self.create_annotation), ("驗證", self.validate), ("確認發布結果", self.confirm)):
+                       ("建立註記", self.create_annotation), ("調高附件", self.attach), ("驗證", self.validate),
+                       ("確認發布結果", self.confirm)):
             ttk.Button(top, text=t, command=cmd).pack(side="left", padx=2)
         pw = ttk.PanedWindow(self, orient="vertical")
         pw.pack(fill="both", expand=True)
@@ -732,6 +739,11 @@ class AnnounceTab(ttk.Frame):
             return P.update_price_action(self.app.ctx(), a["id"], v, expected_version=a["row_version"])
         self.app.run(W.form, self, "修改調高", fields, initial=a, on_ok=ok)
         self.load()
+
+    def attach(self):
+        a = self.actions.one(self)
+        if a:
+            open_dialog(self, self.app, "price_action", a["id"])
 
     def create_annotation(self):
         sel = self.actions.selected()
