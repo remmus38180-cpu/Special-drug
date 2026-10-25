@@ -11,6 +11,7 @@ import { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT } from '../core/v
 import { taipeiDisplay, taipeiHM, taipeiCompact, parseIso, revLabel } from '../core/util.js';
 import { settingLabel, DEFAULT_SETTINGS } from '../core/dataset.js';
 import { MIN_KEYWORD_LENGTH } from '../core/keyword.js';
+import { hasBusinessData } from '../core/demo.js';
 
 const PROFILE_KEY = 'specdrug.profile';
 // 設計建議（待使用者同意）：同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。預設關閉。
@@ -397,6 +398,8 @@ function renderStatusBar() {
   const modeText = st.mode === 'edit' ? '編輯中' : st.mode === 'query' ? '查詢' : '無法開啟';
   bar.appendChild(h('span', { class: 'chip' + (st.mode === 'edit' ? ' chip-edit' : ''), text: `模式：${modeText}` }));
   bar.appendChild(h('span', { text: `資料夾：${ui.folderName}` }));
+  const info = s.committed && s.committed.data && s.committed.data.info;
+  if (info && info.demo) bar.appendChild(h('span', { class: 'chip chip-warn', text: '示範資料夾（非正式資料）' }));
   const t = st.token;
   let tokText = '編輯牌：狀態不明';
   if (t) {
@@ -514,13 +517,26 @@ async function viewVersion(name) {
 
 function renderHome() {
   const s = ui.session;
-  const c = s.committed.data.collections;
-  return h('section', { class: 'panel' },
+  const data = s.mode === 'edit' ? s.work : s.committed.data;
+  const c = data.collections;
+  const box = h('section', { class: 'panel' },
     h('h2', { text: '首頁' }),
+    data.info && data.info.demo ? h('p', { class: 'warn-text', text: '此為示範資料夾：內容為模擬資料，非正式資料。' }) : null,
     h('p', { text: `目前版本 ${revLabel(s.current.revision)}，儲存於 ${fmtIso(s.current.saved_at)}，操作者 ${who(s.current.saved_by)}。` }),
     h('p', { class: 'note', text: '業務功能（收案、會議、主檔匯入、認定、公告、合約、查詢、匯出、備份還原、移轉）將於後續階段加入。' }),
-    table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])),
-  );
+    table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])));
+  if (s.mode === 'edit' && !hasBusinessData(data)) {
+    box.appendChild(h('h3', { text: '示範資料' }));
+    box.appendChild(h('p', { class: 'note', text: '僅供教育訓練與驗收展示；只能載入到尚無任何業務資料的新資料夾，載入後此資料夾標示為示範資料夾。請勿在正式資料夾使用。' }));
+    box.appendChild(btn('載入示範資料到新資料夾', () => guard(async () => {
+      const ok = await dialog('載入示範資料', [h('p', { text: '將寫入模擬主檔、案件、會議、認定、合約、調高與註記，成為未儲存變更；此資料夾之後將永久標示為示範資料夾。確定載入？' })],
+        [{ label: '取消', value: null }, { label: '載入', value: true, primary: true }]);
+      if (!ok) return;
+      await s.loadDemo();
+      await alertBox('已載入', '示範資料已成為未儲存變更，請按「儲存」。');
+    })));
+  }
+  return box;
 }
 
 let historyCache = null;

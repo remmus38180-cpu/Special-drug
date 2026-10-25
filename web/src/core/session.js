@@ -4,7 +4,9 @@ import { openFolder, initFolder, readCurrent, saveVersion, writeTest, verifyHist
 import { EditToken } from './token.js';
 import { KeywordGuard, verifyKeyword, changeKeyword, writeKeyword, readKeywordRecord } from './keyword.js';
 import { effectiveSettings, validateSettingsPatch } from './dataset.js';
-import { deepClone, newId, isoUtc } from './util.js';
+import { deepClone, newId, isoUtc, sha256Text } from './util.js';
+import { buildDemo, demoMasterFile, hasBusinessData } from './demo.js';
+import { actorText, opSeen, opRecord, validateData } from './model.js';
 import { APP_VERSION } from './version.js';
 
 const CONTROL_ENTITIES = new Set(['editing_token', 'keyword']);
@@ -244,6 +246,41 @@ export class AppSession {
     this.emit();
   }
 
+  // 業務操作：fn(副本, ctx) 於資料副本上執行，成功才整批成立（失敗不留半完成狀態）。
+  // opId：確認類操作之唯一操作id；同一id重送只生效一次，回傳第一次之結果（T17）。
+  // refs：本次新增引用之檔案 [{path, sha256, label}]，存檔前驗證存在與雜湊。
+  async run(fn, { opId, kind, refs } = {}) {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '目前為查詢模式，請先取得編輯牌');
+    const seen = opSeen(this.work, opId);
+    if (seen) return { ...(seen.result || {}), replayed: true };
+    const next = deepClone(this.work);
+    const ctx = { actor: actorText(this.session), now: isoUtc(this.clock.now()), newId, events: [], opId: opId || null };
+    const result = fn(next, ctx);
+    if (opId) opRecord(next, ctx, opId, kind || 'op', result);
+    this.work = next;
+    for (const ev of ctx.events) this.pending.push(this._event(ev.entity, ev.action, ev.diff, ev.reason, ev.entity_id, ev.op_id));
+    if (refs && refs.length) this.refs = this.refs.concat(refs);
+    this.dirty += 1;
+    await this._persistDraft();
+    this.emit();
+    return result;
+  }
+
+  // 載入示範資料：只可用於尚無業務資料之新資料夾；主檔列資料先寫入 masters/ 並驗雜湊
+  async loadDemo() {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '載入示範資料須先取得編輯牌');
+    if (hasBusinessData(this.work)) throw new SpecError('NOT_NEW_FOLDER', '此資料夾已有業務資料；示範資料只能載入到新資料夾');
+    const importId = newId();
+    const mf = demoMasterFile(importId);
+    await this.fs.create(mf.path, mf.text);
+    const back = await this.fs.read(mf.path);
+    const sha256 = await sha256Text(mf.text);
+    if (!back || (await sha256Text(back.text)) !== sha256) throw new SpecError('WRITE_VERIFY', '主檔列資料寫入後讀回雜湊不符');
+    return this.run((d, ctx) => buildDemo(d, ctx, { importId, path: mf.path, sha256, rowCount: mf.rowCount }), {
+      refs: [{ path: mf.path, sha256, label: '模擬主檔列資料' }],
+    });
+  }
+
   async updateSettings(patch, reason) {
     const { next, diff } = validateSettingsPatch(this.work.settings, patch);
     if (!Object.keys(diff).length) return { changed: false };
@@ -255,6 +292,10 @@ export class AppSession {
     if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '目前為查詢模式，無法儲存');
     if (this.tokenUncertain) throw new SpecError('TOKEN_UNCERTAIN', '編輯牌狀態不明（心跳寫入失敗），暫停存檔；恢復連線後將自動重新確認');
     if (!this.hasUnsaved) return { status: 'nothing' };
+    const problems = validateData(this.work);
+    if (problems.length) {
+      throw new SpecError('DATA_INVALID', '資料一致性檢查未通過，拒絕儲存：' + problems.slice(0, 10).join('；') + (problems.length > 10 ? `…等${problems.length}項` : ''), { problems });
+    }
     // 同一 save_id 保留到確定成功；上次送出內容（結果不明）記於 prevSent
     if (!this.saveAttempt) this.saveAttempt = { saveId: newId(), sent: null };
     const attempt = this.saveAttempt;

@@ -147,6 +147,29 @@ try {
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });
   check('H18 結束編輯→編輯牌無人持有', true);
 
+  // 模擬資料：新資料夾載入
+  await p3.getByRole('button', { name: '關閉資料夾' }).click();
+  await p3.evaluate(() => window.localStorage.setItem('e2e.dir', 'demo'));
+  await p3.getByRole('button', { name: '建立新資料夾（選空資料夾）' }).click();
+  const pw2 = p3.locator('dialog.dlg input[type=password]');
+  await pw2.nth(0).fill('kw-5678');
+  await pw2.nth(1).fill('kw-5678');
+  await clickDlg(p3, '確定');
+  await p3.locator('.statusbar', { hasText: 'r000000' }).waitFor({ timeout: 10000 });
+  await p3.getByRole('button', { name: '開始編輯' }).click();
+  await p3.locator('.statusbar', { hasText: '模式：編輯中' }).waitFor({ timeout: 15000 });
+  await p3.getByRole('button', { name: '載入示範資料到新資料夾' }).click();
+  await clickDlg(p3, '載入');
+  await p3.locator('dialog.dlg', { hasText: '已載入' }).waitFor({ timeout: 10000 });
+  await clickDlg(p3, '確定');
+  await p3.getByRole('button', { name: '儲存', exact: true }).click();
+  await p3.locator('.statusbar', { hasText: 'r000001' }).waitFor({ timeout: 10000 });
+  check('載入示範資料並儲存；狀態列標示示範資料夾', (await p3.locator('.statusbar').innerText()).includes('示範資料夾'));
+  check('示範資料筆數', (await p3.locator('td', { hasText: 'case_record' }).locator('xpath=following-sibling::td').innerText()) === '3');
+  await p3.getByRole('button', { name: '結束編輯' }).click();
+  await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });
+  await p3.evaluate(() => window.localStorage.setItem('e2e.dir', 'f1'));
+
   // 非空、非本系統資料夾拒絕初始化
   await p3.getByRole('button', { name: '關閉資料夾' }).click();
   await p3.evaluate(async () => {
