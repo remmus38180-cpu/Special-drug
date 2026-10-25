@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
-<meta name="build-date" content="2026-10-18">
-<meta name="commit" content="65cc4dd">
+<meta name="build-date" content="2026-10-25">
+<meta name="commit" content="1c59c8d">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -414,8 +414,8 @@ const __m_core_version_js = (function () {
 // 程式版本與資料結構版本（第11.5節）。建置腳本替換 __BUILD_DATE__、__COMMIT__。
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
-const BUILD_DATE = "2026-10-18";
-const BUILD_COMMIT = "65cc4dd";
+const BUILD_DATE = "2026-10-25";
+const BUILD_COMMIT = "1c59c8d";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -1185,6 +1185,804 @@ class EditToken {
 return { TOKEN_FORMAT, EditToken };
 })();
 
+// ---- core/values.js ----
+const __m_core_values_js = (function () {
+// 值型別：金額（十進位字串，不用浮點）、日期（YYYY-MM-DD，可讀民國年）、代碼（文字，保留前導零）。
+const { SpecError } = __m_core_errors_js;
+// ---------- 金額 ----------
+const MONEY_RE = /^-?\d+(\.\d+)?$/;
+
+// 正規化金額文字（去千分位、去多餘零：12.50→12.5、12.0→12）；無法解析回傳 null
+function normalizeMoney(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') throw new SpecError('MONEY_FLOAT', '金額不得以數值（浮點）傳入，請以文字傳入');
+  let s = String(v).trim().replace(/,/g, '');
+  if (!MONEY_RE.test(s)) return null;
+  let neg = s.startsWith('-');
+  if (neg) s = s.slice(1);
+  let [i, f = ''] = s.split('.');
+  i = i.replace(/^0+(?=\d)/, '');
+  f = f.replace(/0+$/, '');
+  if (i === '0' && !f) neg = false;
+  return (neg ? '-' : '') + i + (f ? '.' + f : '');
+}
+
+function toScaled(a, scale) {
+  const neg = a.startsWith('-');
+  const s = neg ? a.slice(1) : a;
+  const [i, f = ''] = s.split('.');
+  const n = BigInt(i + f.padEnd(scale, '0'));
+  return neg ? -n : n;
+}
+
+function scaleOf(a) {
+  const k = a.indexOf('.');
+  return k < 0 ? 0 : a.length - k - 1;
+}
+
+function fromScaled(n, scale) {
+  const neg = n < 0n;
+  let s = (neg ? -n : n).toString().padStart(scale + 1, '0');
+  const out = scale ? s.slice(0, s.length - scale) + '.' + s.slice(s.length - scale) : s;
+  return normalizeMoney((neg ? '-' : '') + out);
+}
+
+function needMoney(a) {
+  const n = normalizeMoney(a);
+  if (n === null) throw new SpecError('MONEY_BAD', `金額格式錯誤：${a}`);
+  return n;
+}
+
+function compareMoney(a, b) {
+  const x = needMoney(a); const y = needMoney(b);
+  const sc = Math.max(scaleOf(x), scaleOf(y));
+  const d = toScaled(x, sc) - toScaled(y, sc);
+  return d < 0n ? -1 : d > 0n ? 1 : 0;
+}
+
+function addMoney(a, b) {
+  const x = needMoney(a); const y = needMoney(b);
+  const sc = Math.max(scaleOf(x), scaleOf(y));
+  return fromScaled(toScaled(x, sc) + toScaled(y, sc), sc);
+}
+
+function subMoney(a, b) {
+  const x = needMoney(a); const y = needMoney(b);
+  const sc = Math.max(scaleOf(x), scaleOf(y));
+  return fromScaled(toScaled(x, sc) - toScaled(y, sc), sc);
+}
+
+// ---------- 日期 ----------
+const ISO_RE = /^\s*(\d{4})[./-](\d{1,2})[./-](\d{1,2})\s*$/;
+const YMD8_RE = /^\s*(\d{4})(\d{2})(\d{2})\s*$/;
+const ROC_RE = /^\s*(\d{2,3})[./-](\d{1,2})[./-](\d{1,2})\s*$/;
+const ROC7_RE = /^\s*(\d{3})(\d{2})(\d{2})\s*$/;
+
+function validYmd(y, m, d) {
+  if (m < 1 || m > 12 || d < 1) return null;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+// 解析西元或民國日期；無法解析回傳 null（不猜測）
+function parseDate(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const s = String(v);
+  for (const [re, roc] of [[ISO_RE, false], [YMD8_RE, false], [ROC_RE, true], [ROC7_RE, true]]) {
+    const m = re.exec(s);
+    if (m) {
+      let y = Number(m[1]);
+      if (roc) y += 1911;
+      return validYmd(y, Number(m[2]), Number(m[3]));
+    }
+  }
+  return null;
+}
+
+function isIsoDate(s) {
+  return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && parseDate(s) === s;
+}
+
+function rocDisplay(iso) {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-');
+  return `${Number(y) - 1911}/${m}/${d}`;
+}
+
+// 起日含、迄日不含；起日空白視為未知→不成立
+function inPeriod(day, from, to) {
+  if (!from) return false;
+  if (day < from) return false;
+  if (to && day >= to) return false;
+  return true;
+}
+
+function taipeiToday(ms) {
+  return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+// ---------- 代碼 ----------
+// 回傳 {code, error}；只去前後空白；不改O/0、不補前導零；數值型可能遺失前導零列為錯誤
+function normalizeCode(raw) {
+  if (raw === null || raw === undefined) return { code: null, error: '代碼空白' };
+  if (typeof raw === 'boolean') return { code: null, error: '代碼型別錯誤' };
+  if (typeof raw === 'number' || typeof raw === 'bigint') return { code: null, error: `代碼為數值型（${raw}），可能遺失前導零，不自行補碼` };
+  const s = String(raw).trim();
+  if (!s) return { code: null, error: '代碼空白' };
+  if (/^[0-9.]+[Ee][+-]?[0-9]+$/.test(s)) return { code: null, error: `代碼疑似科學記號（${s}）` };
+  return { code: s, error: null };
+}
+
+return { normalizeMoney, compareMoney, addMoney, subMoney, parseDate, isIsoDate, rocDisplay, inPeriod, taipeiToday, normalizeCode };
+})();
+
+// ---- core/model.js ----
+const __m_core_model_js = (function () {
+// 資料模型（第6節）：集合欄位定義、狀態值域、通用建立／修改函式（欄位白名單，第11.4節）、
+// 確認／撤銷專責函式、操作id、整體一致性檢查。純函式，操作傳入之 data 物件。
+const { SpecError } = __m_core_errors_js;
+const { normalizeMoney, isIsoDate, normalizeCode } = __m_core_values_js;
+// ---------- 狀態值域（第6.3節） ----------
+const E = {
+  CASE_STATUS: ['辦理中', '待補件', '待提會', '待後續辦理', '已結案', '撤回'],
+  RESULT: ['同意', '不同意', '附條件同意', '補充資料後再議', '暫緩', '其他', '待確認'],
+  SUMMARY: ['尚無結論', '全部同意', '部分同意', '全部不同意', '撤回', '其他'],
+  MEETING_TYPE: ['專家', '藥事小組', '共同擬訂', '其他'],
+  NATURE: ['專家建議', '會議決議'],
+  CONFIRM: ['草稿', '待確認', '已確認', '撤銷'],
+  COMPLETENESS: ['完整', '不完整', '待確認'],
+  CONTRACT_REQ: ['須簽約', '當時無須簽約', '待確認'],
+  CONTRACT_STATUS: ['辦理中', '完成簽署', '終止'],
+  PRICE_STATUS: ['未辦', '辦理中', '已核定', '撤回／取消'],
+  ANNOTATION_ACTION: ['新增', '改類', '取消', '更正'],
+  // B16：系統類別選項只列現行名稱
+  CATEGORY: ['不可替代特殊藥品', '特殊藥品'],
+  METHOD: ['DET', '第25條', '待確認'],
+  IMPORT_STATUS: ['試匯入', '已啟用', '已停用', '失敗'],
+  SNAPSHOT_STATUS: ['預覽', '已確認', '撤銷'],
+  EVAL: ['符合', '待確認'],
+  MANUAL: ['納入', '排除'],
+  REVIEW_STATUS: ['待處理', '已處理', '不處理'],
+  MIGRATION_STATUS: ['待核對', '已寫入', '略過'],
+  LINK_ENTITY: ['case_record', 'meeting', 'meeting_agenda', 'decision', 'contract', 'recognition_revision', 'price_action', 'master_import', 'migration_batch'],
+  ANNOTATION_COMPARE: ['一致', '應有未有', '主檔有但無完整依據', '類別不同', '無法判定'],
+};
+
+// 共通欄位：一律由建立／修改函式設定
+const COMMON = ['id', 'created_by', 'created_at', 'updated_by', 'updated_at', 'row_version'];
+// 只能由對應的建立或確認函式設定（第11.4節第1點）
+const PROTECTED = new Set([...COMMON, 'confirm_status', 'confirmed_by', 'confirmed_at']);
+
+// 欄位定義：t＝型別（text、date、money、int、bool、json、code、enum、ref）；
+// e＝值域；r＝參照集合；req＝必填；fix＝建立後不可改；edit:false＝一般修改函式不可改（有專責函式）
+const F = (t, o = {}) => ({ t, ...o });
+
+const SCHEMA = {
+  case_record: {
+    label: '案件',
+    unique: [['case_no']],
+    fields: {
+      case_no: F('text', { req: true, fix: true }),
+      recv_date: F('date'), recv_doc_no: F('text'), subject: F('text', { req: true }), applicant: F('text'),
+      request_item: F('text'), unit: F('text'), handler: F('text'),
+      status: F('enum', { e: E.CASE_STATUS, def: '辦理中' }),
+      result_summary: F('enum', { e: E.SUMMARY, def: '尚無結論', edit: false }),
+      result_summary_note: F('text', { edit: false }),
+      result_decision_ids: F('json', { edit: false }),
+      result_confirmed_by: F('text', { edit: false }), result_confirmed_at: F('text', { edit: false }),
+      completeness: F('enum', { e: E.COMPLETENESS, def: '完整' }), pending_fields: F('text'),
+      close_reason: F('text', { edit: false }), close_basis: F('text', { edit: false }),
+      prior_case_id: F('ref', { r: 'case_record', fix: true }),
+      source_ref: F('text'), notes: F('text'),
+    },
+  },
+  case_drug: {
+    label: '案件品項',
+    unique: [['case_id', 'drug_code']],
+    fields: {
+      case_id: F('ref', { r: 'case_record', req: true, fix: true }),
+      drug_code: F('code', { req: true, fix: true }),
+      drug_name_text: F('text'), role: F('text', { def: '申請品項' }), note: F('text'),
+    },
+  },
+  meeting: {
+    label: '會議',
+    fields: {
+      meeting_type: F('enum', { e: E.MEETING_TYPE, req: true }), name: F('text', { req: true }),
+      meeting_date: F('date'), session_no: F('text'), notes: F('text'),
+    },
+  },
+  meeting_agenda: {
+    label: '議案',
+    fields: {
+      meeting_id: F('ref', { r: 'meeting', req: true }),
+      case_id: F('ref', { r: 'case_record', req: true, fix: true }),
+      agenda_no: F('text'), subject: F('text'), proposal: F('text'), discussion: F('text'), original_text: F('text'),
+    },
+  },
+  decision: {
+    label: '決議',
+    fields: {
+      agenda_id: F('ref', { r: 'meeting_agenda', req: true, fix: true }),
+      nature: F('enum', { e: E.NATURE, req: true }),
+      result: F('enum', { e: E.RESULT, req: true }),
+      result_text: F('text'), conditions: F('text'), approval_doc_no: F('text'), approval_date: F('date'),
+      supersedes_id: F('ref', { r: 'decision', fix: true }), correction_reason: F('text', { fix: true }),
+    },
+    check: (r) => (r.result === '其他' && !(r.result_text && String(r.result_text).trim()) ? '結果為「其他」須填結果原文說明' : null),
+  },
+  decision_drug: {
+    label: '決議品項結果',
+    unique: [['decision_id', 'case_drug_id']],
+    fields: {
+      decision_id: F('ref', { r: 'decision', req: true, fix: true }),
+      case_drug_id: F('ref', { r: 'case_drug', req: true, fix: true }),
+      result: F('enum', { e: E.RESULT, req: true }), conditions: F('text'), note: F('text'),
+    },
+    check: (r) => (r.result === '其他' && !(r.note && String(r.note).trim()) ? '品項結果為「其他」須填說明' : null),
+  },
+  recognition: {
+    label: '認定項目',
+    unique: [['recognition_no']],
+    fields: {
+      recognition_no: F('text', { req: true, fix: true }), name: F('text', { req: true }), unit: F('text'), description: F('text'),
+    },
+  },
+  recognition_revision: {
+    label: '認定版本',
+    confirmable: true,
+    unique: [['recognition_id', 'revision_no']],
+    fields: {
+      recognition_id: F('ref', { r: 'recognition', req: true, fix: true }),
+      revision_no: F('int', { req: true, fix: true }),
+      category: F('enum', { e: E.CATEGORY }), original_category: F('text', { fix: true }),
+      scope_text: F('text'), rule: F('json'), conditions_text: F('text'),
+      effective_from: F('date'), effective_to: F('date'),
+      decision_id: F('ref', { r: 'decision' }), case_id: F('ref', { r: 'case_record' }),
+      supersedes_id: F('ref', { r: 'recognition_revision', fix: true }), correction_reason: F('text', { fix: true }),
+      completeness: F('enum', { e: E.COMPLETENESS, def: '完整' }),
+      confirm_status: F('enum', { e: E.CONFIRM, def: '草稿' }), confirmed_by: F('text'), confirmed_at: F('text'),
+      revoke_reason: F('text', { edit: false }),
+    },
+  },
+  revision_decision: {
+    label: '認定依據',
+    unique: [['revision_id', 'decision_id', 'link_type']],
+    fields: {
+      revision_id: F('ref', { r: 'recognition_revision', req: true, fix: true }),
+      decision_id: F('ref', { r: 'decision', req: true, fix: true }),
+      link_type: F('text', { def: '依據', fix: true }),
+    },
+  },
+  master_import: {
+    label: '主檔匯入',
+    fields: {
+      kind: F('text', { def: 'drug', fix: true }), source_name: F('text', { req: true, fix: true }),
+      sha256: F('text', { req: true, fix: true }), base_date: F('date'), sheet: F('text', { fix: true }),
+      header_row: F('int', { fix: true }), mapping: F('json', { fix: true }), row_count: F('int', { fix: true }),
+      check: F('json', { fix: true }), rows_file: F('text', { fix: true }), rows_sha256: F('text', { fix: true }),
+      status: F('enum', { e: E.IMPORT_STATUS, req: true, edit: false }),
+      activated_by: F('text', { edit: false }), activated_at: F('text', { edit: false }), note: F('text'),
+    },
+  },
+  scope_snapshot: {
+    label: '範圍快照',
+    fields: {
+      revision_id: F('ref', { r: 'recognition_revision', req: true, fix: true }),
+      import_id: F('ref', { r: 'master_import', req: true, fix: true }),
+      rule_hash: F('text', { req: true, fix: true }), rule: F('json', { fix: true }),
+      evaluated_at: F('text', { fix: true }), match_count: F('int', { fix: true }), pending_count: F('int', { fix: true }),
+      status: F('enum', { e: E.SNAPSHOT_STATUS, def: '預覽', edit: false }),
+      confirmed_by: F('text'), confirmed_at: F('text'), note: F('text'),
+    },
+  },
+  scope_member: {
+    label: '範圍名單',
+    unique: [['snapshot_id', 'drug_code']],
+    fields: {
+      snapshot_id: F('ref', { r: 'scope_snapshot', req: true, fix: true }), drug_code: F('code', { req: true, fix: true }),
+      eval_result: F('enum', { e: E.EVAL, req: true, fix: true }), path: F('text', { fix: true }),
+      manual_result: F('enum', { e: E.MANUAL }), manual_reason: F('text'),
+      group_code: F('text', { fix: true }), source_row: F('int', { fix: true }),
+    },
+  },
+  group_treatment: {
+    label: '分組調價方式',
+    confirmable: true,
+    fields: {
+      group_code: F('code', { req: true, fix: true }), revision_id: F('ref', { r: 'recognition_revision', fix: true }),
+      method: F('enum', { e: E.METHOD, req: true }), partial_cover: F('bool', { def: false }),
+      effective_from: F('date'), effective_to: F('date'), basis: F('text'),
+      confirm_status: F('enum', { e: E.CONFIRM, def: '草稿' }), confirmed_by: F('text'), confirmed_at: F('text'),
+      revoke_reason: F('text', { edit: false }),
+    },
+  },
+  contract: {
+    label: '合約',
+    fields: {
+      contract_no: F('text', { req: true }), firm: F('text'), signed_date: F('date'), effective_from: F('date'),
+      expiry_date: F('date'), doc_version: F('text'), obligations: F('text'),
+      status: F('enum', { e: E.CONTRACT_STATUS, def: '辦理中' }),
+      original_contract_id: F('ref', { r: 'contract', fix: true }),
+    },
+  },
+  contract_drug: {
+    label: '合約品項',
+    unique: [['contract_id', 'drug_code']],
+    fields: {
+      contract_id: F('ref', { r: 'contract', req: true, fix: true }), drug_code: F('code', { req: true, fix: true }),
+      effective_from: F('date'), effective_to: F('date'),
+    },
+  },
+  price_action: {
+    label: '調高紀錄',
+    confirmable: true,
+    fields: {
+      case_id: F('ref', { r: 'case_record' }),
+      drug_code: F('code', { req: true, fix: true }),
+      revision_id: F('ref', { r: 'recognition_revision', req: true, fix: true }),
+      snapshot_id: F('ref', { r: 'scope_snapshot', fix: true }),
+      contract_requirement: F('enum', { e: E.CONTRACT_REQ, def: '待確認' }), requirement_basis: F('text'),
+      contract_id: F('ref', { r: 'contract' }),
+      price_before: F('money'), price_after: F('money'), effective_date: F('date'),
+      announce_doc_no: F('text'), announce_date: F('date'),
+      status: F('enum', { e: E.PRICE_STATUS, def: '未辦' }),
+      completeness: F('enum', { e: E.COMPLETENESS, def: '完整' }),
+      supersedes_id: F('ref', { r: 'price_action', fix: true }),
+      confirm_status: F('enum', { e: E.CONFIRM, def: '草稿' }), confirmed_by: F('text'), confirmed_at: F('text'),
+      revoke_reason: F('text', { edit: false }), note: F('text'),
+    },
+  },
+  annotation_event: {
+    label: '註記事件',
+    confirmable: true,
+    fields: {
+      drug_code: F('code', { req: true, fix: true }),
+      revision_id: F('ref', { r: 'recognition_revision', fix: true }),
+      price_action_id: F('ref', { r: 'price_action', fix: true }),
+      category: F('enum', { e: E.CATEGORY }),
+      action: F('enum', { e: E.ANNOTATION_ACTION, req: true, fix: true }),
+      effective_date: F('date'), basis: F('text'),
+      original_event_id: F('ref', { r: 'annotation_event', fix: true }),
+      confirm_status: F('enum', { e: E.CONFIRM, def: '草稿' }), confirmed_by: F('text'), confirmed_at: F('text'),
+      revoke_reason: F('text', { edit: false }),
+    },
+  },
+  attachment: {
+    label: '附件',
+    fields: {
+      orig_name: F('text', { req: true, fix: true }), storage_key: F('text', { req: true, fix: true }),
+      sha256: F('text', { req: true, fix: true }), size: F('int', { req: true, fix: true }), mime: F('text', { fix: true }),
+      version: F('int', { def: 1, fix: true }),
+    },
+  },
+  attachment_link: {
+    label: '附件關聯',
+    unique: [['attachment_id', 'entity', 'entity_id']],
+    fields: {
+      attachment_id: F('ref', { r: 'attachment', req: true, fix: true }),
+      entity: F('enum', { e: E.LINK_ENTITY, req: true, fix: true }), entity_id: F('text', { req: true, fix: true }),
+    },
+  },
+  op_log: {
+    label: '操作紀錄',
+    unique: [['op_id']],
+    fields: { op_id: F('text', { req: true, fix: true }), kind: F('text', { fix: true }), result: F('json', { fix: true }) },
+  },
+  review_item: {
+    label: '差異待辦',
+    fields: {
+      kind: F('text', { req: true, fix: true }), drug_code: F('code', { fix: true }), group_code: F('code', { fix: true }),
+      revision_id: F('ref', { r: 'recognition_revision', fix: true }), import_id: F('ref', { r: 'master_import', fix: true }),
+      detail: F('text', { fix: true }), status: F('enum', { e: E.REVIEW_STATUS, def: '待處理' }), conclusion: F('text'),
+    },
+  },
+  migration_batch: {
+    label: '移轉批次',
+    fields: {
+      source_name: F('text', { req: true, fix: true }), sha256: F('text', { req: true, fix: true }),
+      sheet: F('text', { req: true, fix: true }), row_count: F('int', { fix: true }),
+    },
+  },
+  migration_row: {
+    label: '移轉列',
+    unique: [['source_sha256', 'sheet', 'row_no']],
+    fields: {
+      batch_id: F('ref', { r: 'migration_batch', req: true, fix: true }), source_sha256: F('text', { req: true, fix: true }),
+      sheet: F('text', { req: true, fix: true }), row_no: F('int', { req: true, fix: true }),
+      raw: F('json', { req: true, fix: true }), parsed: F('json'), issues: F('json'),
+      status: F('enum', { e: E.MIGRATION_STATUS, def: '待核對', edit: false }),
+      committed_case_id: F('ref', { r: 'case_record', edit: false }), committed_recognition_id: F('ref', { r: 'recognition', edit: false }),
+      decided_by: F('text', { edit: false }), decided_at: F('text', { edit: false }),
+    },
+  },
+};
+
+// ---------- 操作情境 ----------
+// ctx：{actor:'員編／電腦', now:'ISO', newId:()=>uuid, events:[]}（events 由 session 轉為稽核紀錄）
+function actorText(session) {
+  return `${session.user}／${session.pc}`;
+}
+
+function schemaOf(coll) {
+  const s = SCHEMA[coll];
+  if (!s) throw new SpecError('NO_COLLECTION', `未知的資料集合：${coll}`);
+  return s;
+}
+
+function list(data, coll) {
+  schemaOf(coll);
+  return data.collections[coll] || (data.collections[coll] = []);
+}
+
+function find(data, coll, id) {
+  return list(data, coll).find((r) => r.id === id) || null;
+}
+
+function must(data, coll, id) {
+  const r = find(data, coll, id);
+  if (!r) throw new SpecError('NOT_FOUND', `找不到${schemaOf(coll).label}（${id}）`);
+  return r;
+}
+
+// 單一欄位值檢查與正規化
+function coerce(coll, name, def, v) {
+  const label = `${schemaOf(coll).label}.${name}`;
+  if (v === undefined || v === null || v === '') return def.t === 'bool' ? !!v : null;
+  switch (def.t) {
+    case 'text': return String(v);
+    case 'date': {
+      if (!isIsoDate(v)) throw new SpecError('BAD_VALUE', `${label} 日期須為 YYYY-MM-DD：${v}`);
+      return v;
+    }
+    case 'money': {
+      const m = normalizeMoney(v);
+      if (m === null) throw new SpecError('BAD_VALUE', `${label} 金額格式錯誤：${v}`);
+      return m;
+    }
+    case 'int': {
+      if (!Number.isInteger(v)) throw new SpecError('BAD_VALUE', `${label} 須為整數：${v}`);
+      return v;
+    }
+    case 'bool': return !!v;
+    case 'json': return JSON.parse(JSON.stringify(v));
+    case 'code': {
+      const { code, error } = normalizeCode(v);
+      if (error) throw new SpecError('BAD_CODE', `${label}：${error}`);
+      return code;
+    }
+    case 'enum': {
+      if (!def.e.includes(v)) throw new SpecError('BAD_VALUE', `${label} 須為：${def.e.join('／')}（收到「${v}」）`);
+      return v;
+    }
+    case 'ref': return String(v);
+    default: throw new SpecError('BAD_SCHEMA', `未知型別 ${def.t}`);
+  }
+}
+
+function checkRef(data, coll, name, def, v) {
+  if (def.t === 'ref' && v !== null && !find(data, def.r, v)) {
+    throw new SpecError('BAD_REF', `${schemaOf(coll).label}.${name} 參照之${schemaOf(def.r).label}不存在（${v}）`);
+  }
+}
+
+function checkUnique(data, coll, rec) {
+  for (const keys of schemaOf(coll).unique || []) {
+    const dup = list(data, coll).find((r) => r.id !== rec.id && keys.every((k) => r[k] === rec[k]));
+    if (dup) throw new SpecError('DUPLICATE', `${schemaOf(coll).label}重複：${keys.map((k) => `${k}=${rec[k]}`).join('、')}`);
+  }
+}
+
+function diffOf(before, after) {
+  const out = {};
+  for (const k of new Set([...Object.keys(before || {}), ...Object.keys(after || {})])) {
+    if (k === 'row_version' || k === 'updated_at' || k === 'updated_by') continue;
+    const a = before ? before[k] : undefined;
+    const b = after ? after[k] : undefined;
+    if (JSON.stringify(a) !== JSON.stringify(b)) out[k] = { from: a === undefined ? null : a, to: b === undefined ? null : b };
+  }
+  return out;
+}
+
+function emit(ctx, coll, id, action, diff, reason) {
+  ctx.events.push({ entity: coll, entity_id: id, action, diff, reason: reason || null, op_id: ctx.opId || null });
+}
+
+// 建立：保護欄位不得由呼叫端給；確認狀態一律從預設（草稿）開始
+function insert(data, ctx, coll, values, { reason, action } = {}) {
+  const s = schemaOf(coll);
+  const rec = { id: ctx.newId() };
+  for (const k of Object.keys(values)) {
+    if (PROTECTED.has(k)) throw new SpecError('FIELD_PROTECTED', `${s.label}：欄位 ${k} 只能由專責函式設定`);
+    if (!s.fields[k]) throw new SpecError('FIELD_UNKNOWN', `${s.label} 無欄位：${k}`);
+  }
+  for (const [name, def] of Object.entries(s.fields)) {
+    if (name === 'confirmed_by' || name === 'confirmed_at') { rec[name] = null; continue; }
+    const v = Object.prototype.hasOwnProperty.call(values, name) ? values[name] : def.def;
+    rec[name] = coerce(coll, name, def, v);
+    if (def.req && (rec[name] === null || rec[name] === '')) throw new SpecError('REQUIRED', `${s.label}：${name} 必填`);
+    checkRef(data, coll, name, def, rec[name]);
+  }
+  if (s.check) { const m = s.check(rec); if (m) throw new SpecError('BAD_VALUE', `${s.label}：${m}`); }
+  rec.created_by = ctx.actor;
+  rec.created_at = ctx.now;
+  rec.updated_by = ctx.actor;
+  rec.updated_at = ctx.now;
+  rec.row_version = 1;
+  checkUnique(data, coll, rec);
+  list(data, coll).push(rec);
+  emit(ctx, coll, rec.id, action || '新增', diffOf(null, rec), reason);
+  return rec;
+}
+
+// 一般修改函式：欄位白名單；保護欄位、建立後不可改欄位、專責欄位一律拒絕；已確認或撤銷之資料無修改入口
+function update(data, ctx, coll, id, changes, { expectedVersion, reason, allow } = {}) {
+  const s = schemaOf(coll);
+  const rec = must(data, coll, id);
+  if (expectedVersion !== undefined && expectedVersion !== null && rec.row_version !== expectedVersion) {
+    throw new SpecError('VERSION_CONFLICT', '資料已被更新（版本不符），請重新載入核對後再修改；本次修改未寫入');
+  }
+  if (s.fields.confirm_status && (rec.confirm_status === '已確認' || rec.confirm_status === '撤銷')) {
+    throw new SpecError('CONFIRMED_READONLY', `${s.label}已${rec.confirm_status}，不可修改；更正請建立新版本或取代紀錄`);
+  }
+  const allowSet = new Set(allow || []);
+  const before = { ...rec };
+  const next = { ...rec };
+  for (const [k, v] of Object.entries(changes)) {
+    const def = s.fields[k];
+    if (PROTECTED.has(k)) throw new SpecError('FIELD_PROTECTED', `${s.label}：欄位 ${k} 不得經一般修改函式改變`);
+    if (!def) throw new SpecError('FIELD_UNKNOWN', `${s.label} 無欄位：${k}`);
+    if (def.fix) throw new SpecError('FIELD_FIXED', `${s.label}：欄位 ${k} 建立後不可修改；如需改，請撤銷後重建`);
+    if (def.edit === false && !allowSet.has(k)) throw new SpecError('FIELD_PROTECTED', `${s.label}：欄位 ${k} 須以專責功能修改`);
+    next[k] = coerce(coll, k, def, v);
+    if (def.req && (next[k] === null || next[k] === '')) throw new SpecError('REQUIRED', `${s.label}：${k} 必填`);
+    checkRef(data, coll, k, def, next[k]);
+  }
+  if (s.check) { const m = s.check(next); if (m) throw new SpecError('BAD_VALUE', `${s.label}：${m}`); }
+  const diff = diffOf(before, next);
+  if (!Object.keys(diff).length) return rec;
+  next.updated_by = ctx.actor;
+  next.updated_at = ctx.now;
+  next.row_version = rec.row_version + 1;
+  checkUnique(data, coll, next);
+  Object.assign(rec, next);
+  emit(ctx, coll, id, '修改', diff, reason);
+  return rec;
+}
+
+// 確認類狀態轉換之專責函式（業務模組於驗證後呼叫）
+const TRANSITIONS = { 草稿: ['待確認', '已確認', '撤銷'], 待確認: ['草稿', '已確認', '撤銷'], 已確認: [], 撤銷: [] };
+
+function setConfirmStatus(data, ctx, coll, id, status, { reason } = {}) {
+  const s = schemaOf(coll);
+  if (!s.confirmable) throw new SpecError('NOT_CONFIRMABLE', `${s.label}無確認狀態`);
+  const rec = must(data, coll, id);
+  if (!E.CONFIRM.includes(status)) throw new SpecError('BAD_VALUE', `確認狀態不正確：${status}`);
+  if (!TRANSITIONS[rec.confirm_status].includes(status)) {
+    throw new SpecError('BAD_TRANSITION', `${s.label}由「${rec.confirm_status}」不可改為「${status}」`);
+  }
+  if (status === '撤銷' && !(reason && String(reason).trim())) throw new SpecError('REQUIRED', '撤銷須填原因');
+  const before = { ...rec };
+  rec.confirm_status = status;
+  if (status === '已確認') { rec.confirmed_by = ctx.actor; rec.confirmed_at = ctx.now; }
+  if (status === '撤銷') rec.revoke_reason = String(reason).trim();
+  rec.updated_by = ctx.actor;
+  rec.updated_at = ctx.now;
+  rec.row_version += 1;
+  emit(ctx, coll, id, status === '已確認' ? '確認' : status === '撤銷' ? '撤銷' : `改為${status}`, diffOf(before, rec), reason);
+  return rec;
+}
+
+// 專責欄位設定（例：案件結果摘要、結案、主檔啟用、快照確認）；只供業務模組呼叫，限定欄位
+function setDedicated(data, ctx, coll, id, changes, { action, reason, fields }) {
+  const allowed = new Set(fields);
+  for (const k of Object.keys(changes)) {
+    if (!allowed.has(k)) throw new SpecError('FIELD_PROTECTED', `${schemaOf(coll).label}：此功能不可設定 ${k}`);
+  }
+  const s = schemaOf(coll);
+  const rec = must(data, coll, id);
+  const before = { ...rec };
+  for (const [k, v] of Object.entries(changes)) {
+    const def = s.fields[k];
+    rec[k] = coerce(coll, k, def, v);
+    checkRef(data, coll, k, def, rec[k]);
+  }
+  rec.updated_by = ctx.actor;
+  rec.updated_at = ctx.now;
+  rec.row_version += 1;
+  emit(ctx, coll, id, action, diffOf(before, rec), reason);
+  return rec;
+}
+
+// ---------- 操作id（第11.3節、T17）----------
+function opSeen(data, opId) {
+  if (!opId) return null;
+  return list(data, 'op_log').find((r) => r.op_id === opId) || null;
+}
+
+function opRecord(data, ctx, opId, kind, result) {
+  if (!opId) return;
+  const rec = { id: ctx.newId(), op_id: opId, kind, result: result === undefined ? null : JSON.parse(JSON.stringify(result)),
+    created_by: ctx.actor, created_at: ctx.now, updated_by: ctx.actor, updated_at: ctx.now, row_version: 1 };
+  list(data, 'op_log').push(rec);
+}
+
+// ---------- 整體一致性檢查（儲存前；第4.5節步驟2） ----------
+function validateData(data) {
+  const problems = [];
+  if (!data || !data.collections) return ['資料格式錯誤：缺 collections'];
+  for (const [coll, s] of Object.entries(SCHEMA)) {
+    const rows = data.collections[coll];
+    if (!Array.isArray(rows)) { problems.push(`缺集合 ${coll}`); continue; }
+    const ids = new Set();
+    for (const r of rows) {
+      if (!r.id) { problems.push(`${s.label}有一筆缺id`); continue; }
+      if (ids.has(r.id)) problems.push(`${s.label} id重複：${r.id}`);
+      ids.add(r.id);
+      for (const [name, def] of Object.entries(s.fields)) {
+        const v = r[name];
+        if (def.req && (v === null || v === undefined || v === '')) problems.push(`${s.label}（${r.id}）${name} 必填`);
+        if (v === null || v === undefined) continue;
+        try { coerce(coll, name, def, v); } catch (e) { problems.push(`${e.message}（${r.id}）`); }
+        if (def.t === 'ref' && !(data.collections[def.r] || []).some((x) => x.id === v)) {
+          problems.push(`${s.label}（${r.id}）${name} 參照不存在：${v}`);
+        }
+        if (def.t === 'money' && typeof v !== 'string') problems.push(`${s.label}（${r.id}）${name} 金額須為文字`);
+        if (def.t === 'code' && typeof v !== 'string') problems.push(`${s.label}（${r.id}）${name} 代碼須為文字`);
+      }
+      if (s.check) { const m = s.check(r); if (m) problems.push(`${s.label}（${r.id}）${m}`); }
+    }
+    for (const keys of s.unique || []) {
+      const seen = new Set();
+      for (const r of rows) {
+        const k = JSON.stringify(keys.map((x) => r[x]));
+        if (seen.has(k)) problems.push(`${s.label}重複：${keys.join('+')}=${k}`);
+        seen.add(k);
+      }
+    }
+  }
+  return problems;
+}
+
+return { E, PROTECTED, SCHEMA, actorText, list, find, must, insert, update, setConfirmStatus, setDedicated, opSeen, opRecord, validateData };
+})();
+
+// ---- core/demo.js ----
+const __m_core_demo_js = (function () {
+// 模擬資料（非真實資料）：供教育訓練與驗收展示。只可載入「新資料夾」（尚無任何業務資料）。
+// 內容：模擬主檔、通過／未通過／辦理中案件、多次會議、逐品項決議、認定版本與快照、合約、調高與註記。
+const { SpecError } = __m_core_errors_js;
+const { insert, setConfirmStatus, setDedicated, list, SCHEMA } = __m_core_model_js;
+const { masterPath } = __m_core_paths_js;
+const DEMO_MASTER_COLUMNS = ['drug_code', 'drug_name', 'firm', 'group_code', 'atc_code', 'dose_code', 'dose_name', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation_raw'];
+
+const DEMO_ROWS = [
+  ['DEMO000001', '模擬注射劑甲 5ML', '模擬藥廠甲', 'DEMOGRP00001', 'J06BA01', '20', '注射劑', 'N', '5', 'ML', '120', '0'],
+  ['DEMO000002', '模擬注射劑乙 10ML', '模擬藥廠乙', 'DEMOGRP00001', 'J06BA01', '20', '注射劑', 'N', '10', 'ML', '200', '0'],
+  ['DEMO000003', '模擬錠劑丙', '模擬藥廠丙', 'DEMOGRP00002', 'L04AA03', '11', '一般錠劑膠囊劑', 'N', '', '', '8.5', '3'],
+  ['DEMO000004', '模擬錠劑丁', '模擬藥廠甲', 'DEMOGRP00003', 'L04AA04', '11', '一般錠劑膠囊劑', 'Y', '', '', '6', '0'],
+  ['DEMO000005', '模擬眼藥水', '模擬藥廠乙', 'DEMOGRP00004', 'S01FA01', '43', '眼用液劑', 'N', '5', 'ML', '45', '4'],
+  ['0DEMO00006', '模擬前導零品項', '模擬藥廠丙', 'DEMOGRP00004', 'S01FA01', '43', '眼用液劑', 'N', '10', 'ML', '52.50', '0'],
+];
+
+function hasBusinessData(data) {
+  return Object.keys(SCHEMA).some((c) => c !== 'op_log' && (data.collections[c] || []).length > 0);
+}
+
+// 主檔列資料檔內容（masters/<import_id>.json）
+function demoMasterFile(importId) {
+  const rows = DEMO_ROWS.map((r, i) => {
+    const o = {};
+    DEMO_MASTER_COLUMNS.forEach((c, j) => { o[c] = r[j] === '' ? null : r[j]; });
+    o.drug_code_raw = o.drug_code;
+    o.source_row = i + 2;
+    return o;
+  });
+  const file = {
+    format: 'specdrug-master', import_id: importId, source_name: '模擬主檔.csv', base_date: '2026-10-01',
+    columns: DEMO_MASTER_COLUMNS, rows,
+  };
+  return { path: masterPath(importId), text: JSON.stringify(file) + '\n', rowCount: rows.length };
+}
+
+// 於資料副本上建立模擬資料；master：{importId, path, sha256, rowCount}
+function buildDemo(data, ctx, master) {
+  if (hasBusinessData(data)) throw new SpecError('NOT_NEW_FOLDER', '此資料夾已有業務資料；示範資料只能載入到新資料夾');
+  const I = (coll, v, o) => insert(data, ctx, coll, v, o);
+  data.info = { ...(data.info || {}), demo: true, demo_loaded_at: ctx.now };
+
+  const imp = I('master_import', {
+    source_name: '模擬主檔.csv', sha256: master.sha256, base_date: '2026-10-01', sheet: null, header_row: 1,
+    mapping: Object.fromEntries(DEMO_MASTER_COLUMNS.map((c) => [c, c])), row_count: master.rowCount,
+    check: { duplicates: 0, conflicts: 0, missing: 0 }, rows_file: master.path, rows_sha256: master.sha256,
+    status: '試匯入', note: '模擬資料',
+  });
+  setDedicated(data, ctx, 'master_import', imp.id, { status: '已啟用', activated_by: ctx.actor, activated_at: ctx.now },
+    { action: '啟用主檔', fields: ['status', 'activated_by', 'activated_at'] });
+
+  // 案件一：多次會議，部分同意，接續認定、簽約、調高
+  const ok = I('case_record', {
+    case_no: 'DEMO2026-0001', subject: '模擬注射劑建議列特殊藥品', applicant: '模擬藥廠甲', recv_date: '2026-03-02',
+    recv_doc_no: '模擬收文001', unit: '調價', handler: '承辦A',
+  });
+  const cd1 = I('case_drug', { case_id: ok.id, drug_code: 'DEMO000001', drug_name_text: '模擬注射劑甲 5ML' });
+  const cd2 = I('case_drug', { case_id: ok.id, drug_code: 'DEMO000002', drug_name_text: '模擬注射劑乙 10ML' });
+  const m1 = I('meeting', { meeting_type: '專家', name: '模擬專家會議115年4月', meeting_date: '2026-04-10', session_no: '115-1' });
+  const m2 = I('meeting', { meeting_type: '共同擬訂', name: '模擬擬訂會議115年6月', meeting_date: '2026-06-18', session_no: '115-2' });
+  const a1 = I('meeting_agenda', { meeting_id: m1.id, case_id: ok.id, agenda_no: '3', subject: '模擬注射劑建議列特殊藥品' });
+  const d1 = I('decision', { agenda_id: a1.id, nature: '專家建議', result: '同意', result_text: '建議同意甲品項；乙品項暫緩。' });
+  I('decision_drug', { decision_id: d1.id, case_drug_id: cd1.id, result: '同意' });
+  I('decision_drug', { decision_id: d1.id, case_drug_id: cd2.id, result: '暫緩' });
+  const a2 = I('meeting_agenda', { meeting_id: m2.id, case_id: ok.id, agenda_no: '5', subject: '模擬注射劑建議列特殊藥品' });
+  const d2 = I('decision', { agenda_id: a2.id, nature: '會議決議', result: '附條件同意', result_text: '甲品項附條件同意；乙品項不同意。', conditions: '須完成穩定供貨簽約' });
+  I('decision_drug', { decision_id: d2.id, case_drug_id: cd1.id, result: '附條件同意', conditions: '須完成穩定供貨簽約' });
+  I('decision_drug', { decision_id: d2.id, case_drug_id: cd2.id, result: '不同意' });
+  setDedicated(data, ctx, 'case_record', ok.id, {
+    result_summary: '部分同意', result_decision_ids: [d2.id], result_confirmed_by: ctx.actor, result_confirmed_at: ctx.now,
+  }, { action: '確認結果摘要', fields: ['result_summary', 'result_decision_ids', 'result_confirmed_by', 'result_confirmed_at'] });
+
+  const rec = I('recognition', { recognition_no: 'DEMO-R0001', name: '模擬注射劑（5ML規格）', unit: '調價' });
+  const rule = { op: 'and', children: [
+    { field: 'group_code', op: 'eq', value: 'DEMOGRP00001' },
+    { field: 'spec', op: 'eq', value: '5', unit: 'ML' },
+  ] };
+  const rev = I('recognition_revision', {
+    recognition_id: rec.id, revision_no: 1, category: '不可替代特殊藥品', scope_text: '分組代碼=DEMOGRP00001 & 規格量=5mL',
+    rule, conditions_text: '須完成穩定供貨簽約', effective_from: '2026-08-01', decision_id: d2.id, case_id: ok.id,
+  });
+  I('revision_decision', { revision_id: rev.id, decision_id: d2.id, link_type: '依據' });
+  const snap = I('scope_snapshot', {
+    revision_id: rev.id, import_id: imp.id, rule_hash: 'demo', rule, evaluated_at: ctx.now, match_count: 1, pending_count: 0,
+    note: '模擬資料：DEMOGRP00001 僅 5ML 規格符合（部分涵蓋分組）',
+  });
+  I('scope_member', { snapshot_id: snap.id, drug_code: 'DEMO000001', eval_result: '符合', path: 'group_code=DEMOGRP00001 且 規格=5 ML', group_code: 'DEMOGRP00001', source_row: 2 });
+  setDedicated(data, ctx, 'scope_snapshot', snap.id, { status: '已確認', confirmed_by: ctx.actor, confirmed_at: ctx.now },
+    { action: '確認快照', fields: ['status', 'confirmed_by', 'confirmed_at'] });
+  setConfirmStatus(data, ctx, 'recognition_revision', rev.id, '已確認');
+  I('group_treatment', { group_code: 'DEMOGRP00001', revision_id: rev.id, method: '待確認', partial_cover: true, basis: '部分涵蓋分組，調價方式待確認（Q02）' });
+
+  const cont = I('contract', {
+    contract_no: '模擬合約-001', firm: '模擬藥廠甲', status: '完成簽署', signed_date: '2026-07-01', effective_from: '2026-08-01',
+    expiry_date: '2029-07-31', obligations: '穩定供貨三年', doc_version: '1',
+  });
+  I('contract_drug', { contract_id: cont.id, drug_code: 'DEMO000001', effective_from: '2026-08-01' });
+  const pa = I('price_action', {
+    case_id: ok.id, drug_code: 'DEMO000001', revision_id: rev.id, snapshot_id: snap.id, contract_requirement: '須簽約',
+    requirement_basis: '模擬：現行須簽約', contract_id: cont.id, price_before: '120', price_after: '180', effective_date: '2026-08-01',
+    announce_doc_no: '模擬公告001', announce_date: '2026-07-15', status: '已核定',
+  });
+  const an = I('annotation_event', {
+    drug_code: 'DEMO000001', revision_id: rev.id, price_action_id: pa.id, category: '不可替代特殊藥品', action: '新增',
+    effective_date: '2026-08-01', basis: '模擬公告001',
+  });
+  setConfirmStatus(data, ctx, 'price_action', pa.id, '已確認');
+  setConfirmStatus(data, ctx, 'annotation_event', an.id, '已確認');
+
+  // 案件二：未通過（兩種會議），已結案
+  const no = I('case_record', { case_no: 'DEMO2026-0002', subject: '模擬眼藥水申請提高', applicant: '模擬藥廠乙', recv_date: '2026-02-01', recv_doc_no: '模擬收文002', unit: '核價', handler: '承辦B' });
+  const cd5 = I('case_drug', { case_id: no.id, drug_code: 'DEMO000005', drug_name_text: '模擬眼藥水' });
+  const a3 = I('meeting_agenda', { meeting_id: m1.id, case_id: no.id, agenda_no: '4', subject: '模擬眼藥水申請提高' });
+  const d3 = I('decision', { agenda_id: a3.id, nature: '專家建議', result: '補充資料後再議' });
+  I('decision_drug', { decision_id: d3.id, case_drug_id: cd5.id, result: '補充資料後再議' });
+  const a4 = I('meeting_agenda', { meeting_id: m2.id, case_id: no.id, agenda_no: '6', subject: '模擬眼藥水申請提高（重提）' });
+  const d4 = I('decision', { agenda_id: a4.id, nature: '會議決議', result: '不同意' });
+  I('decision_drug', { decision_id: d4.id, case_drug_id: cd5.id, result: '不同意' });
+  setDedicated(data, ctx, 'case_record', no.id, {
+    result_summary: '全部不同意', result_decision_ids: [d4.id], result_confirmed_by: ctx.actor, result_confirmed_at: ctx.now,
+  }, { action: '確認結果摘要', fields: ['result_summary', 'result_decision_ids', 'result_confirmed_by', 'result_confirmed_at'] });
+  setDedicated(data, ctx, 'case_record', no.id, { status: '已結案', close_reason: '共擬不同意', close_basis: '模擬擬訂會議115年6月紀錄' },
+    { action: '結案', fields: ['status', 'close_reason', 'close_basis'] });
+
+  // 案件三：辦理中、收文資料不完整（歷史補登）
+  I('case_record', { case_no: 'DEMO2026-0003', subject: '模擬錠劑丙申請列特殊藥品', applicant: null, completeness: '待確認', pending_fields: 'recv_date,recv_doc_no,applicant', status: '待提會' });
+
+  return { importId: imp.id, counts: Object.fromEntries(Object.keys(SCHEMA).map((c) => [c, list(data, c).length])) };
+}
+
+return { DEMO_MASTER_COLUMNS, hasBusinessData, demoMasterFile, buildDemo };
+})();
+
 // ---- core/session.js ----
 const __m_core_session_js = (function () {
 // 工作階段：查詢／編輯模式、編輯牌、儲存、復原草稿（第4.5、4.6節）。不碰DOM。
@@ -1193,7 +1991,9 @@ const { openFolder, initFolder, readCurrent, saveVersion, writeTest, verifyHisto
 const { EditToken } = __m_core_token_js;
 const { KeywordGuard, verifyKeyword, changeKeyword, writeKeyword, readKeywordRecord } = __m_core_keyword_js;
 const { effectiveSettings, validateSettingsPatch } = __m_core_dataset_js;
-const { deepClone, newId, isoUtc } = __m_core_util_js;
+const { deepClone, newId, isoUtc, sha256Text } = __m_core_util_js;
+const { buildDemo, demoMasterFile, hasBusinessData } = __m_core_demo_js;
+const { actorText, opSeen, opRecord, validateData } = __m_core_model_js;
 const { APP_VERSION } = __m_core_version_js;
 const CONTROL_ENTITIES = new Set(['editing_token', 'keyword']);
 
@@ -1432,6 +2232,41 @@ class AppSession {
     this.emit();
   }
 
+  // 業務操作：fn(副本, ctx) 於資料副本上執行，成功才整批成立（失敗不留半完成狀態）。
+  // opId：確認類操作之唯一操作id；同一id重送只生效一次，回傳第一次之結果（T17）。
+  // refs：本次新增引用之檔案 [{path, sha256, label}]，存檔前驗證存在與雜湊。
+  async run(fn, { opId, kind, refs } = {}) {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '目前為查詢模式，請先取得編輯牌');
+    const seen = opSeen(this.work, opId);
+    if (seen) return { ...(seen.result || {}), replayed: true };
+    const next = deepClone(this.work);
+    const ctx = { actor: actorText(this.session), now: isoUtc(this.clock.now()), newId, events: [], opId: opId || null };
+    const result = fn(next, ctx);
+    if (opId) opRecord(next, ctx, opId, kind || 'op', result);
+    this.work = next;
+    for (const ev of ctx.events) this.pending.push(this._event(ev.entity, ev.action, ev.diff, ev.reason, ev.entity_id, ev.op_id));
+    if (refs && refs.length) this.refs = this.refs.concat(refs);
+    this.dirty += 1;
+    await this._persistDraft();
+    this.emit();
+    return result;
+  }
+
+  // 載入示範資料：只可用於尚無業務資料之新資料夾；主檔列資料先寫入 masters/ 並驗雜湊
+  async loadDemo() {
+    if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '載入示範資料須先取得編輯牌');
+    if (hasBusinessData(this.work)) throw new SpecError('NOT_NEW_FOLDER', '此資料夾已有業務資料；示範資料只能載入到新資料夾');
+    const importId = newId();
+    const mf = demoMasterFile(importId);
+    await this.fs.create(mf.path, mf.text);
+    const back = await this.fs.read(mf.path);
+    const sha256 = await sha256Text(mf.text);
+    if (!back || (await sha256Text(back.text)) !== sha256) throw new SpecError('WRITE_VERIFY', '主檔列資料寫入後讀回雜湊不符');
+    return this.run((d, ctx) => buildDemo(d, ctx, { importId, path: mf.path, sha256, rowCount: mf.rowCount }), {
+      refs: [{ path: mf.path, sha256, label: '模擬主檔列資料' }],
+    });
+  }
+
   async updateSettings(patch, reason) {
     const { next, diff } = validateSettingsPatch(this.work.settings, patch);
     if (!Object.keys(diff).length) return { changed: false };
@@ -1443,6 +2278,10 @@ class AppSession {
     if (this.mode !== 'edit') throw new SpecError('NOT_EDITING', '目前為查詢模式，無法儲存');
     if (this.tokenUncertain) throw new SpecError('TOKEN_UNCERTAIN', '編輯牌狀態不明（心跳寫入失敗），暫停存檔；恢復連線後將自動重新確認');
     if (!this.hasUnsaved) return { status: 'nothing' };
+    const problems = validateData(this.work);
+    if (problems.length) {
+      throw new SpecError('DATA_INVALID', '資料一致性檢查未通過，拒絕儲存：' + problems.slice(0, 10).join('；') + (problems.length > 10 ? `…等${problems.length}項` : ''), { problems });
+    }
     // 同一 save_id 保留到確定成功；上次送出內容（結果不明）記於 prevSent
     if (!this.saveAttempt) this.saveAttempt = { saveId: newId(), sent: null };
     const attempt = this.saveAttempt;
@@ -1906,6 +2745,7 @@ const { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT } = __m_core_versi
 const { taipeiDisplay, taipeiHM, taipeiCompact, parseIso, revLabel } = __m_core_util_js;
 const { settingLabel, DEFAULT_SETTINGS } = __m_core_dataset_js;
 const { MIN_KEYWORD_LENGTH } = __m_core_keyword_js;
+const { hasBusinessData } = __m_core_demo_js;
 const PROFILE_KEY = 'specdrug.profile';
 // 設計建議（待使用者同意）：同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。預設關閉。
 const LOCAL_CLOSED_RELEASE = false;
@@ -2291,6 +3131,8 @@ function renderStatusBar() {
   const modeText = st.mode === 'edit' ? '編輯中' : st.mode === 'query' ? '查詢' : '無法開啟';
   bar.appendChild(h('span', { class: 'chip' + (st.mode === 'edit' ? ' chip-edit' : ''), text: `模式：${modeText}` }));
   bar.appendChild(h('span', { text: `資料夾：${ui.folderName}` }));
+  const info = s.committed && s.committed.data && s.committed.data.info;
+  if (info && info.demo) bar.appendChild(h('span', { class: 'chip chip-warn', text: '示範資料夾（非正式資料）' }));
   const t = st.token;
   let tokText = '編輯牌：狀態不明';
   if (t) {
@@ -2408,13 +3250,26 @@ async function viewVersion(name) {
 
 function renderHome() {
   const s = ui.session;
-  const c = s.committed.data.collections;
-  return h('section', { class: 'panel' },
+  const data = s.mode === 'edit' ? s.work : s.committed.data;
+  const c = data.collections;
+  const box = h('section', { class: 'panel' },
     h('h2', { text: '首頁' }),
+    data.info && data.info.demo ? h('p', { class: 'warn-text', text: '此為示範資料夾：內容為模擬資料，非正式資料。' }) : null,
     h('p', { text: `目前版本 ${revLabel(s.current.revision)}，儲存於 ${fmtIso(s.current.saved_at)}，操作者 ${who(s.current.saved_by)}。` }),
     h('p', { class: 'note', text: '業務功能（收案、會議、主檔匯入、認定、公告、合約、查詢、匯出、備份還原、移轉）將於後續階段加入。' }),
-    table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])),
-  );
+    table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])));
+  if (s.mode === 'edit' && !hasBusinessData(data)) {
+    box.appendChild(h('h3', { text: '示範資料' }));
+    box.appendChild(h('p', { class: 'note', text: '僅供教育訓練與驗收展示；只能載入到尚無任何業務資料的新資料夾，載入後此資料夾標示為示範資料夾。請勿在正式資料夾使用。' }));
+    box.appendChild(btn('載入示範資料到新資料夾', () => guard(async () => {
+      const ok = await dialog('載入示範資料', [h('p', { text: '將寫入模擬主檔、案件、會議、認定、合約、調高與註記，成為未儲存變更；此資料夾之後將永久標示為示範資料夾。確定載入？' })],
+        [{ label: '取消', value: null }, { label: '載入', value: true, primary: true }]);
+      if (!ok) return;
+      await s.loadDemo();
+      await alertBox('已載入', '示範資料已成為未儲存變更，請按「儲存」。');
+    })));
+  }
+  return box;
 }
 
 let historyCache = null;
