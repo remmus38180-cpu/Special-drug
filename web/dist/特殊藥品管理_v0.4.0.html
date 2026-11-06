@@ -6,7 +6,7 @@
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
 <meta name="build-date" content="2026-11-07">
-<meta name="commit" content="ce8ad22">
+<meta name="commit" content="9fb44a8">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -79,6 +79,19 @@ tr.clickable:hover td { background: var(--accent-weak); }
 .kv dd { margin: 0; }
 .pager { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 @media (max-width: 640px) { .form-row, .kv { grid-template-columns: 1fr; } }
+.rule-editor { margin: 8px 0; }
+.rule-group { border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 6px 10px; margin: 6px 0; background: var(--panel); }
+.rule-not { border-left-color: var(--pink-deep); background: var(--pink); }
+.rule-manual { border-left-color: var(--warn, #6b5413); }
+.rule-leaf { border: 1px dashed var(--line); padding: 4px 8px; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.rule-leaf select, .rule-leaf input, .rule-leaf textarea, .rule-group select { font: inherit; border: 1px solid var(--line); }
+.rule-bad { background: var(--pink); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.chip-x { padding: 0 4px; margin: 0 0 0 4px; border-width: 1px; }
+.pick-list { display: flex; flex-direction: column; max-height: 14em; overflow-y: auto; }
+.pick-item { text-align: left; border-width: 1px; margin: 1px 0; }
+.rule-desc pre, details pre { background: var(--bg); border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; font-size: 13px; }
+.warn-list { margin: 6px 0; }
 
 </style>
 </head>
@@ -436,7 +449,7 @@ const __m_core_version_js = (function () {
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
 const BUILD_DATE = "2026-11-07";
-const BUILD_COMMIT = "ce8ad22";
+const BUILD_COMMIT = "9fb44a8";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -460,6 +473,7 @@ const DEFAULT_SETTINGS = {
   keyword_lock_sec: 30,
   csv_header_notes: true,
   attachment_max_mb: 50,
+  large_scope_threshold: 500,
 };
 
 const SETTING_RULES = {
@@ -469,6 +483,7 @@ const SETTING_RULES = {
   keyword_lock_sec: { type: 'int', min: 5, max: 3600, label: '輸錯鎖定（秒）' },
   csv_header_notes: { type: 'bool', label: 'CSV加說明列' },
   attachment_max_mb: { type: 'int', min: 1, max: 500, label: '附件大小上限（MB）' },
+  large_scope_threshold: { type: 'int', min: 1, max: 100000, label: '範圍過大警示門檻（筆）' },
 };
 
 function settingLabel(key) {
@@ -2640,8 +2655,20 @@ const RULE_FIELD_NEEDS = {
   group_code: ['group_code'], atc_code: ['atc_code'], dose_code: ['dose_code'], multi_mark: ['multi_mark'],
   spec: ['spec_qty', 'spec_unit'], firm: ['firm'], firm_code: ['firm_code'], ingredient: ['ingredient'], drug_code: ['drug_code'],
 };
-// 已知規格單位；不在清單內視為未知單位→規則判定待確認
+// 已知規格單位：優先取 DWM_DRUG_RCODE type 2（規格單位代碼）英文名；未提供代碼檔時用內建清單。
+// 不在清單內視為未知單位→規則判定待確認；單位間不自行換算。
 const KNOWN_UNITS = ['ML', 'L', 'GM', 'MG', 'MCG', 'KG', 'IU', 'KIU', 'MIU', 'U', 'KU', 'MU', 'DOSE', 'MCL'];
+
+function unitsFromRcode(rcode) {
+  const out = new Set();
+  for (const [k, v] of rcode) {
+    if (!k.startsWith('2|')) continue;
+    const u = normUnit(v.ename || v.cname);
+    if (u) out.add(u);
+  }
+  if (!out.size) throw new SpecError('RCODE', '代碼檔沒有 type 2（規格單位）資料');
+  return [...out].sort();
+}
 
 // 【設計建議】預設映射；匯入時仍由使用者確認
 const PRESETS = [
@@ -2768,7 +2795,7 @@ function sameRec(a, b) {
 }
 
 // 試匯入：不寫任何檔案，回傳 {records(Map), check}
-async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, tick }) {
+async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, knownUnits, unitSource, tick }) {
   if (!mapping || !mapping.drug_code) throw new SpecError('MAP_REQUIRED', '必須映射「藥品代碼」欄位');
   const bad = Object.keys(mapping).filter((k) => !TARGETS.has(k));
   if (bad.length) throw new SpecError('MAP_UNKNOWN', '未知的映射目標：' + bad.join('、'));
@@ -2785,6 +2812,9 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
     if (i < 0) missingSrc.push(`${FIELD_LABEL[t]}←${name}`); else src[t] = i;
   }
   if (missingSrc.length) throw new SpecError('MAP_MISSING', '來源檔找不到映射欄位：' + missingSrc.join('、'));
+  const units = knownUnits ? [...knownUnits] : (rcode ? unitsFromRcode(rcode) : KNOWN_UNITS.slice());
+  const unitSet = new Set(units);
+  const unitFrom = unitSource || (knownUnits ? '指定' : rcode ? 'DWM_DRUG_RCODE type 2' : '內建清單');
   const wanted = new Set(Object.values(src));
   const records = new Map();
   const rowsOf = new Map();
@@ -2833,7 +2863,7 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
     if (rec.spec_unit !== undefined) {
       const u = normUnit(rec.spec_unit);
       rec.spec_unit = u;
-      if (u && !KNOWN_UNITS.includes(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
+      if (u && !unitSet.has(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
     }
     rec.annotation = mapping.annotation_raw ? normAnnotation(rec.annotation_raw) : null;
     rec.source_row = r.rowNo;
@@ -2871,6 +2901,7 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
     disabled_rule_fields: disabledRules,
     missing_values: Object.fromEntries([...mapped].filter((f) => f !== 'drug_code').map((f) => [f, [...records.values()].filter((x) => x[f] === null || x[f] === undefined).length])),
     base_date: base,
+    known_units: units, unit_source: unitFrom,
   };
   return { records, check, headers, mapping: { ...mapping }, lookups: lk, conflictCodes, sheet: sheet || null, headerRow };
 }
@@ -2992,7 +3023,7 @@ async function fileSha(bytes) {
 }
 
 
-return { MASTER_FIELDS, FIELD_LABEL, ROW_FIELDS, COMPARE_FIELDS, RULE_FIELD_NEEDS, KNOWN_UNITS, PRESETS, suggestPriceColumn, presetMapping, normUnit, normAnnotation, loadRcode, loadPriceLong, stageMaster, activationProblems, rowsFileText, activateMaster, activeImport, listImports, loadMasterRows, diffMasters, stagedAsRows, masterOptions, fileSha };
+return { MASTER_FIELDS, FIELD_LABEL, ROW_FIELDS, COMPARE_FIELDS, RULE_FIELD_NEEDS, KNOWN_UNITS, unitsFromRcode, PRESETS, suggestPriceColumn, presetMapping, normUnit, normAnnotation, loadRcode, loadPriceLong, stageMaster, activationProblems, rowsFileText, activateMaster, activeImport, listImports, loadMasterRows, diffMasters, stagedAsRows, masterOptions, fileSha };
 })();
 
 // ---- core/demo.js ----
@@ -4785,10 +4816,10 @@ function mappingForm(env) {
       st.priceFile = { name: f.name, bytes, table: openTable(f.name, bytes) };
       st.priceFile.headers = readHeaders(st.priceFile.table, st.priceFile.table.sheets[0], 1);
     })), st.priceFile ? h('span', { text: `${st.priceFile.name}：欄位 ${st.priceFile.headers.length} 個；預設 DRUG_CODE／PAY_S_DATE／PAY_E_DATE（含）／PAY_PRICE` }) : null) : null,
-    preset.lookups ? h('div', { class: 'filters' }, fileInput('代碼檔（DWM_DRUG_RCODE）', (f) => guard(async () => {
+    h('div', { class: 'filters' }, fileInput(preset.lookups ? '代碼檔（DWM_DRUG_RCODE，必要）' : '代碼檔（DWM_DRUG_RCODE，選用：提供規格單位清單）', (f) => guard(async () => {
       const bytes = new Uint8Array(await f.arrayBuffer());
       st.rcodeFile = { name: f.name, bytes };
-    })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : null) : null,
+    })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : h('span', { class: 'note', text: '未提供時，已知規格單位用內建清單（14種）；提供時取 type 2 規格單位代碼之英文名。' })),
     h('div', { class: 'toolbar' }, btn('試匯入（不改目前主檔）', () => guard(async () => {
       const mapping = {};
       for (const [k, s] of Object.entries(sel)) if (s.value) mapping[k] = s.value;
@@ -4798,8 +4829,8 @@ function mappingForm(env) {
       if (!iso) { await alertBox('請填資料基準日', '主檔啟用須有資料基準日（例：2026-11-01）。'); return; }
       const prog = (label) => async (n) => { st.progressEl.textContent = `${label}：已處理 ${n.toLocaleString()} 列…`; await nextTick(); };
       let rcode = null; let price = null;
-      if (preset.lookups) {
-        if (!st.rcodeFile) { await alertBox('缺代碼檔', '此預設映射需 DWM_DRUG_RCODE 代碼檔。'); return; }
+      if (preset.lookups && !st.rcodeFile) { await alertBox('缺代碼檔', '此預設映射需 DWM_DRUG_RCODE 代碼檔。'); return; }
+      if (st.rcodeFile) {
         const t = openTable(st.rcodeFile.name, st.rcodeFile.bytes);
         rcode = await M.loadRcode(t, { sheet: t.sheets[0], tick: prog('讀取代碼檔') });
       }
@@ -4831,6 +4862,7 @@ function stagedPanel(env, act) {
       ['資料列', String(c.total_rows)], ['代碼數', String(c.codes)], ['資料基準日', c.base_date || '未填'],
       ['代碼錯誤（阻止啟用）', String(c.code_error_count)], ['同代碼內容矛盾（阻止啟用）', String(c.conflict_count)],
       ['完全相同重複（確認後合併）', String(c.identical_duplicate_count)], ['警告', String(c.warning_count)],
+      ['已知規格單位來源', `${c.unit_source}（${c.known_units.length} 種）`],
       ['未知規格單位（規則判定待確認）', Object.entries(c.unknown_units).map(([u, n]) => `${u}（${n}）`).join('、') || '無'],
       ['代碼轉換找不到', Object.entries(c.unknown_lookup_count).map(([k, n]) => `${M.FIELD_LABEL[k]} ${n}`).join('、') || '無'],
       ['未映射欄位', c.unmapped_fields.map((k) => M.FIELD_LABEL[k]).join('、') || '無'],
@@ -4860,7 +4892,7 @@ async function doActivate(env) {
   if (!v) return;
   const sources = [{ role: '主檔', name: st.file.name, bytes: st.file.bytes, mime: st.file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }];
   if (st.usePriceLong && st.priceFile) sources.push({ role: '價格長表', name: st.priceFile.name, bytes: st.priceFile.bytes });
-  if (st.rcodeFile && M.PRESETS.find((p) => p.key === (st.preset || 'monthly')).lookups) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
+  if (st.rcodeFile) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
   st.progressEl.textContent = '寫入來源檔與列資料…';
   const r = await M.activateMaster(env.s, st.staged, sources, { confirmMerge: merge.checked, note: note.value.trim() || null, opId });
   env.ui.master = { progress: `已啟用（成為未儲存變更，請按「儲存」）。版本 ${r.import_id.slice(0, 8)}。` };
@@ -4869,6 +4901,647 @@ async function doActivate(env) {
 }
 
 return { masterRows, masterStatusText, masterTab };
+})();
+
+// ---- core/rules.js ----
+const __m_core_rules_js = (function () {
+// 條件 AST（第8節）：白名單驗證、三值判定、說明文字、範圍預覽、原文規則草稿解析（移轉用）。
+// 禁止把使用者文字當程式執行；欄位、運算子、型別皆採白名單。
+const { SpecError } = __m_core_errors_js;
+const { normalizeMoney, compareMoney } = __m_core_values_js;
+const { stableStringify, sha256Text } = __m_core_util_js;
+const { normUnit } = __m_core_masterImport_js;
+const TRUE = '符合';
+const FALSE = '不符合';
+const UNKNOWN = '待確認';
+
+// 欄位白名單：key → {label, type, col}
+const FIELDS = {
+  group_code: { label: '分組代碼', type: 'text', col: 'group_code', name: 'group_name' },
+  atc_code: { label: 'ATC碼', type: 'text', col: 'atc_code', name: 'atc_name' },
+  dose_code: { label: '核價劑型', type: 'text', col: 'dose_code', name: 'dose_name' },
+  multi_mark: { label: '單複方', type: 'text', col: 'multi_mark' },
+  drug_code: { label: '藥品代碼', type: 'text', col: 'drug_code', name: 'drug_name' },
+  firm_code: { label: '藥商代碼', type: 'text', col: 'firm_code', name: 'firm' },
+  firm: { label: '藥商名稱', type: 'text', col: 'firm' },
+  ingredient: { label: '成分', type: 'text', col: 'ingredient' },
+  spec: { label: '規格', type: 'quantity', col: ['spec_qty', 'spec_unit'] },
+};
+const TEXT_OPS = { eq: '等於', ne: '不等於', in: '屬於', not_in: '不屬於', starts_with: '前綴為', not_starts_with: '前綴非' };
+const QTY_OPS = { eq: '=', ne: '≠', gt: '>', ge: '≥', lt: '<', le: '≤' };
+const LOGIC_OPS = { and: '全部符合', or: '任一符合', not: '排除' };
+
+function err(path, msg) {
+  return new SpecError('RULE', `${path}：${msg}`);
+}
+
+function only(node, allowed, path) {
+  const extra = Object.keys(node).filter((k) => !allowed.includes(k));
+  if (extra.length) throw err(path, '不允許的屬性 ' + extra.join(', '));
+}
+
+function validateRule(node, path = '根') {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) throw err(path, '條件格式錯誤');
+  const op = node.op;
+  if (op === 'and' || op === 'or') {
+    if (!Array.isArray(node.children) || !node.children.length) throw err(path, `${LOGIC_OPS[op]}群組不可為空（空規則不得當作全選）`);
+    node.children.forEach((c, i) => validateRule(c, `${path}/${i + 1}`));
+    only(node, ['op', 'children'], path);
+    return;
+  }
+  if (op === 'not') {
+    if (!node.child) throw err(path, '排除條件缺少內容');
+    validateRule(node.child, `${path}/排除`);
+    only(node, ['op', 'child'], path);
+    return;
+  }
+  if (op === 'manual') {
+    if (!String(node.text || '').trim()) throw err(path, '人工條件須保留原文');
+    only(node, ['op', 'text', 'id'], path);
+    return;
+  }
+  const f = FIELDS[node.field];
+  if (!f) throw err(path, `不支援的欄位 ${JSON.stringify(node.field)}`);
+  if (f.type === 'text') {
+    if (!TEXT_OPS[op]) throw err(path, `欄位 ${node.field} 不支援運算子 ${JSON.stringify(op)}`);
+    if (op === 'in' || op === 'not_in') {
+      if (!Array.isArray(node.values) || !node.values.length || !node.values.every((v) => typeof v === 'string' && v.trim())) throw err(path, '清單條件須至少一個文字值');
+      only(node, ['op', 'field', 'values'], path);
+    } else {
+      if (typeof node.value !== 'string' || !node.value.trim()) throw err(path, '條件值須為非空文字');
+      only(node, ['op', 'field', 'value'], path);
+    }
+  } else {
+    if (!QTY_OPS[op]) throw err(path, `規格不支援運算子 ${JSON.stringify(op)}`);
+    if (typeof node.value !== 'string' || normalizeMoney(node.value) === null) throw err(path, '規格數值無法解析');
+    if (!String(node.unit || '').trim()) throw err(path, '規格須指定單位');
+    only(node, ['op', 'field', 'value', 'unit'], path);
+  }
+}
+
+function fieldsUsed(node, out = new Set()) {
+  if (node.op === 'and' || node.op === 'or') node.children.forEach((c) => fieldsUsed(c, out));
+  else if (node.op === 'not') fieldsUsed(node.child, out);
+  else if (node.op !== 'manual') out.add(node.field);
+  return out;
+}
+
+function hasManual(node) {
+  if (node.op === 'and' || node.op === 'or') return node.children.some(hasManual);
+  if (node.op === 'not') return hasManual(node.child);
+  return node.op === 'manual';
+}
+
+function canonical(node) {
+  return stableStringify(node);
+}
+
+function ruleHash(node) {
+  return sha256Text(canonical(node));
+}
+
+// 三值判定。knownUnits：Set（已正規化）；conversions：{'L|ML': '1000'}（僅經確認者；預設無）
+class Evaluator {
+  constructor({ knownUnits, conversions } = {}) {
+    this.known = new Set([...(knownUnits || [])].map(normUnit));
+    this.conv = new Map();
+    for (const [k, factor] of Object.entries(conversions || {})) {
+      const [a, b] = k.split('|').map(normUnit);
+      this.conv.set(`${a}|${b}`, { mul: factor });
+      this.conv.set(`${b}|${a}`, { div: factor });
+    }
+  }
+
+  evaluate(node, drug) {
+    const op = node.op;
+    if (op === 'and') {
+      const rs = node.children.map((c) => this.evaluate(c, drug));
+      const f = rs.find((r) => r[0] === FALSE);
+      if (f) return f;
+      const u = rs.filter((r) => r[0] === UNKNOWN);
+      if (u.length) return [UNKNOWN, u.map((r) => r[1]).join('；')];
+      return [TRUE, rs.map((r) => r[1]).join(' 且 ')];
+    }
+    if (op === 'or') {
+      const rs = node.children.map((c) => this.evaluate(c, drug));
+      const t = rs.find((r) => r[0] === TRUE);
+      if (t) return t;
+      const u = rs.filter((r) => r[0] === UNKNOWN);
+      if (u.length) return [UNKNOWN, u.map((r) => r[1]).join('；')];
+      return [FALSE, '皆不符合'];
+    }
+    if (op === 'not') {
+      const [r, p] = this.evaluate(node.child, drug);
+      if (r === UNKNOWN) return [UNKNOWN, `排除條件待確認（${p}）`];
+      return r === TRUE ? [FALSE, `被排除：${p}`] : [TRUE, `非（${p}）`];
+    }
+    if (op === 'manual') return [UNKNOWN, `人工條件待確認：${node.text}`];
+    const f = FIELDS[node.field];
+    if (f.type === 'quantity') return this.qty(node, drug);
+    let val = drug[f.col];
+    val = val === null || val === undefined ? '' : String(val).trim();
+    if (!val) return [UNKNOWN, `${f.label}缺值`];
+    let ok;
+    if (op === 'eq') ok = val === node.value.trim();
+    else if (op === 'ne') ok = val !== node.value.trim();
+    else if (op === 'in') ok = node.values.some((v) => v.trim() === val);
+    else if (op === 'not_in') ok = !node.values.some((v) => v.trim() === val);
+    else if (op === 'starts_with') ok = val.startsWith(node.value.trim());
+    else ok = !val.startsWith(node.value.trim());
+    return [ok ? TRUE : FALSE, `${f.label}=${val} ${TEXT_OPS[op]} ${node.value !== undefined ? node.value : node.values.join(',')}`];
+  }
+
+  qty(node, drug) {
+    const q = drug.spec_qty === null || drug.spec_qty === undefined ? null : normalizeMoney(String(drug.spec_qty));
+    const unit = normUnit(drug.spec_unit);
+    const want = normalizeMoney(node.value);
+    const wantUnit = normUnit(node.unit);
+    if (q === null || !unit) return [UNKNOWN, '規格缺值'];
+    let qty = q;
+    if (unit !== wantUnit) {
+      const c = this.conv.get(`${unit}|${wantUnit}`);
+      if (!c) {
+        if (this.known.has(unit) && this.known.has(wantUnit)) {
+          if (node.op === 'eq') return [FALSE, `規格單位${unit}≠${wantUnit}`];
+          if (node.op === 'ne') return [TRUE, `規格單位${unit}≠${wantUnit}`];
+          return [UNKNOWN, `規格單位${unit}與${wantUnit}無確認換算，無法比較大小`];
+        }
+        return [UNKNOWN, `規格單位${unit}未知或無確認換算`];
+      }
+      // 經確認之換算：以整數運算避免浮點（乘法）；除法換算比較時以交叉相乘
+      if (c.mul) qty = mulDec(q, c.mul);
+      else return this.cmp(node.op, q, mulDec(want, c.div), unit, `${want}${wantUnit}`);
+    }
+    return this.cmp(node.op, qty, want, wantUnit, `${want}${wantUnit}`);
+  }
+
+  cmp(op, a, b, unit, wantText) {
+    const c = compareMoney(a, b);
+    const ok = { eq: c === 0, ne: c !== 0, gt: c > 0, ge: c >= 0, lt: c < 0, le: c <= 0 }[op];
+    return [ok ? TRUE : FALSE, `規格${a}${unit} ${QTY_OPS[op]} ${wantText}`];
+  }
+}
+
+function mulDec(a, b) {
+  const split = (x) => { const [i, f = ''] = x.replace('-', '').split('.'); return { n: BigInt(i + f), s: f.length, neg: x.startsWith('-') }; };
+  const x = split(normalizeMoney(a)); const y = split(normalizeMoney(String(b)));
+  let n = x.n * y.n;
+  const sc = x.s + y.s;
+  const neg = x.neg !== y.neg;
+  let s = n.toString().padStart(sc + 1, '0');
+  s = sc ? s.slice(0, s.length - sc) + '.' + s.slice(s.length - sc) : s;
+  return normalizeMoney((neg ? '-' : '') + s);
+}
+
+function describe(node, depth = 0) {
+  const pad = '　'.repeat(depth);
+  const op = node.op;
+  if (op === 'and' || op === 'or') return `${pad}${LOGIC_OPS[op]}：\n` + node.children.map((c) => describe(c, depth + 1)).join('\n');
+  if (op === 'not') return `${pad}排除：\n` + describe(node.child, depth + 1);
+  if (op === 'manual') return `${pad}【人工條件】${node.text}`;
+  const f = FIELDS[node.field];
+  if (f.type === 'quantity') return `${pad}${f.label} ${QTY_OPS[op]} ${node.value} ${node.unit}`;
+  return `${pad}${f.label} ${TEXT_OPS[op]} ${node.value !== undefined ? node.value : node.values.join('、')}`;
+}
+
+// 待確認原因分類（供批次人工確認）
+function pendingReason(path) {
+  if (path.includes('人工條件')) return '人工條件';
+  if (path.includes('規格缺值')) return '規格缺值';
+  if (path.includes('未知或無確認換算') || path.includes('無法比較大小')) return '規格單位未知或無換算';
+  const m = /([^\s；=]+)缺值/.exec(path);
+  return m ? `${m[1]}缺值` : '其他';
+}
+
+// 範圍預覽：rows＝loadMasterRows() 結果；imp＝主檔版本紀錄（取停用欄位與已知單位）
+async function previewRule(rule, rows, imp, { threshold = 500, conversions } = {}) {
+  validateRule(rule);
+  if (!imp || imp.status !== '已啟用') throw new SpecError('MASTER_NOT_ACTIVE', '規則預覽須使用已啟用之主檔版本');
+  const disabled = (imp.check && imp.check.disabled_rule_fields) || [];
+  const missing = [...fieldsUsed(rule)].filter((f) => disabled.includes(f));
+  if (missing.length) throw new SpecError('FIELD_DISABLED', '此主檔版本未映射欄位：' + missing.map((f) => FIELDS[f].label).join('、') + '；相關規則停用，請改用含該欄位的主檔或修改條件');
+  const ev = new Evaluator({ knownUnits: (imp.check && imp.check.known_units) || [], conversions });
+  const members = [];
+  const groupTotal = new Map();
+  for (const d of rows.byCode.values()) {
+    const g = d.group_code;
+    if (g) groupTotal.set(g, (groupTotal.get(g) || 0) + 1);
+    const [res, path] = ev.evaluate(rule, d);
+    if (res !== FALSE) {
+      members.push({ drug_code: d.drug_code, result: res, path, group_code: g || null, drug_name: d.drug_name || null, firm: d.firm || null,
+        spec: `${d.spec_qty ?? ''}${d.spec_unit ?? ''}`, source_row: d.source_row ?? null, annotation: d.annotation ?? null });
+    }
+  }
+  members.sort((a, b) => (a.drug_code < b.drug_code ? -1 : 1));
+  const groups = new Map();
+  for (const m of members) {
+    if (!m.group_code) continue;
+    const x = groups.get(m.group_code) || { group_code: m.group_code, matched: 0, pending: 0, total: groupTotal.get(m.group_code) || 0 };
+    if (m.result === TRUE) x.matched++; else x.pending++;
+    groups.set(m.group_code, x);
+  }
+  for (const g of groups.values()) g.partial = g.matched + g.pending < g.total;
+  const match = members.filter((m) => m.result === TRUE).length;
+  const pending = members.length - match;
+  const reasons = {};
+  // 一個品項可能有多個待確認原因（如分組缺值且規格缺值），各別計數
+  for (const m of members) {
+    if (m.result !== UNKNOWN) continue;
+    for (const k of new Set(m.path.split('；').map(pendingReason))) reasons[k] = (reasons[k] || 0) + 1;
+  }
+  const warnings = [];
+  if (!members.length) warnings.push('零筆符合，請檢查條件');
+  if (members.length > threshold) warnings.push(`符合筆數 ${members.length} 超過警示門檻 ${threshold}，請確認範圍`);
+  const partial = [...groups.values()].filter((g) => g.partial).map((g) => g.group_code);
+  if (partial.length) warnings.push('部分涵蓋分組：' + partial.join('、') + '；分組調價方式須另確認，不得直接將整組排除DET（Q02）');
+  if (hasManual(rule)) warnings.push('含人工條件（如跨品項關係），相關品項列為待確認，須逐項人工確認');
+  if (Object.keys(reasons).length) warnings.push('待確認原因：' + Object.entries(reasons).map(([k, v]) => `${k} ${v}筆`).join('；'));
+  return { members, match, pending, groups: [...groups.values()].sort((a, b) => (a.group_code < b.group_code ? -1 : 1)), warnings, reasons,
+    rule_hash: await ruleHash(rule), import_id: imp.id, base_date: imp.base_date };
+}
+
+// ---------- 原文規則草稿解析（Excel移轉用）：無法完整解析時以人工條件保存原文，不猜測 ----------
+const ALIASES = [
+  [/^分組代碼前(\d+)碼$/, 'group_code', 'prefix'],
+  [/^ATC前(\d+)碼$/i, 'atc_code', 'prefix'],
+  [/^(分類)?分組代碼$/, 'group_code', null],
+  [/^規格量?$/, 'spec', 'qty'],
+  [/^ATC7?碼$/i, 'atc_code', null],
+  [/^(核價劑型PDOSE|核價劑型|PDOSE)$/i, 'dose_code', null],
+  [/^複方藥品$/, 'multi_mark', null],
+  [/^(CODE_aggr|CODE|藥品代碼)$/i, 'drug_code', null],
+];
+const ATC7 = /^[A-Z]\d\d[A-Z][A-Z]\d\d$/;
+
+function prep(t) {
+  let s = t;
+  for (const [a, b] of [['＝', '='], ['，', ','], ['、', ','], ['＆', '&'], ['（', '('], ['）', ')'], ['﹛', '('], ['﹜', ')'], ['｛', '('], ['｝', ')'], ['　', ' '], ['≠', '<>']]) s = s.split(a).join(b);
+  return s.trim();
+}
+
+function tokenize(t) {
+  const re = /\s*(\(|\)|&|\bor\b|\bOR\b|\bIN\b|\bin\b|<>|!=|=|,|[^\s()&=,<>!]+)/y;
+  const toks = [];
+  let pos = 0;
+  while (pos < t.length) {
+    re.lastIndex = pos;
+    const m = re.exec(t);
+    if (!m || re.lastIndex === pos) {
+      if (!t.slice(pos).trim()) break;
+      throw new SpecError('RULE_PARSE', `無法辨識「${t.slice(pos, pos + 10)}」`);
+    }
+    const tok = m[1];
+    toks.push(['or', 'in'].includes(tok.toLowerCase()) ? tok.toLowerCase() : tok);
+    pos = re.lastIndex;
+  }
+  return toks;
+}
+
+function isField(tk) {
+  return ALIASES.some(([re]) => re.test(tk));
+}
+
+function parseOr(toks, i) {
+  let [left, j] = parseAnd(toks, i);
+  const kids = [left];
+  while (j < toks.length && toks[j] === 'or') { const [n, k] = parseAnd(toks, j + 1); kids.push(n); j = k; }
+  return [kids.length === 1 ? kids[0] : { op: 'or', children: kids }, j];
+}
+
+function parseAnd(toks, i) {
+  let [left, j] = parseAtom(toks, i);
+  const kids = [left];
+  while (j < toks.length && toks[j] === '&') { const [n, k] = parseAtom(toks, j + 1); kids.push(n); j = k; }
+  return [kids.length === 1 ? kids[0] : { op: 'and', children: kids }, j];
+}
+
+function parseAtom(toks, i) {
+  const fail = (m) => new SpecError('RULE_PARSE', m);
+  if (i >= toks.length) throw fail('條件不完整');
+  if (toks[i] === '(') {
+    const [n, j] = parseOr(toks, i + 1);
+    if (j >= toks.length || toks[j] !== ')') throw fail('括號不對稱');
+    return [n, j + 1];
+  }
+  const name = toks[i];
+  let field = null; let kind = null; let digits = null;
+  for (const [re, f, k] of ALIASES) {
+    const m = re.exec(name);
+    if (m) { field = f; kind = k; digits = k === 'prefix' ? Number(m[1]) : null; break; }
+  }
+  if (!field) throw fail(`未知欄位「${name}」`);
+  i++;
+  if (i >= toks.length) throw fail('缺少運算子');
+  const op = toks[i];
+  if (!['=', '<>', '!=', 'in', ','].includes(op)) throw fail(`未知運算子「${op}」`);
+  i++;
+  const vals = [];
+  let paren = false;
+  if (i < toks.length && toks[i] === '(') { paren = true; i++; }
+  while (i < toks.length) {
+    const tk = toks[i];
+    if (tk === ',') { i++; continue; }
+    if (tk === '&' || tk === 'or' || (tk === ')' && !paren)) break;
+    if (tk === ')') { i++; paren = false; break; }
+    if (['(', '=', '<>', '!=', 'in'].includes(tk)) break;
+    if (isField(tk) && i + 1 < toks.length && ['=', '<>', '!=', 'in'].includes(toks[i + 1])) break;
+    vals.push(tk);
+    i++;
+  }
+  if (paren) throw fail('括號不對稱');
+  if (!vals.length) throw fail(`欄位「${name}」缺少條件值`);
+  const neg = op === '<>' || op === '!=';
+  if (kind === 'qty') {
+    if (vals.length !== 1) throw fail('規格條件僅支援單一值');
+    const m = /^([0-9.]+)\s*([A-Za-z]+)$/.exec(vals[0]);
+    if (!m) throw fail(`規格值「${vals[0]}」無法分成數值與單位`);
+    return [{ field: 'spec', op: neg ? 'ne' : 'eq', value: m[1], unit: m[2].toUpperCase() }, i];
+  }
+  if (kind === 'prefix') {
+    const bad = vals.filter((v) => v.length !== digits);
+    if (bad.length) throw fail(`前${digits}碼條件值長度不符：${bad.join(',')}`);
+    const kids = vals.map((v) => ({ field, op: neg ? 'not_starts_with' : 'starts_with', value: v }));
+    if (kids.length === 1) return [kids[0], i];
+    return [neg ? { op: 'and', children: kids } : { op: 'or', children: kids }, i];
+  }
+  if (vals.length === 1) return [{ field, op: neg ? 'ne' : 'eq', value: vals[0] }, i];
+  return [{ field, op: neg ? 'not_in' : 'in', values: vals }, i];
+}
+
+function* atcValues(node) {
+  if (node.op === 'and' || node.op === 'or') for (const c of node.children) yield* atcValues(c);
+  else if (node.op === 'not') yield* atcValues(node.child);
+  else if (node.field === 'atc_code' && ['eq', 'ne', 'in', 'not_in'].includes(node.op)) yield* (node.value !== undefined ? [node.value] : node.values);
+}
+
+function parseRuleText(text) {
+  const issues = [];
+  if (text === null || text === undefined || !String(text).trim()) return { ast: null, issues: ['篩選原則空白'] };
+  const raw = String(text).trim();
+  const t = prep(raw);
+  if (/=\s*0\s*$/.test(t) || /\)\s*=\s*0/.test(t)) issues.push('條件末尾含「=0」，語意不清，不自動解讀（待業務確認）');
+  if (t.includes('同廠牌') || (t.includes('且') && t.includes('同'))) {
+    issues.push('含跨品項條件（如同廠牌），須人工確認');
+    return { ast: { op: 'manual', text: raw }, issues };
+  }
+  let node;
+  try {
+    const toks = tokenize(t);
+    const [n, pos] = parseOr(toks, 0);
+    if (pos !== toks.length) throw new SpecError('RULE_PARSE', '尚有無法解析的文字');
+    validateRule(n);
+    node = n;
+  } catch (e) {
+    issues.push(`原文無法完整解析（${e.message}），保留為人工條件`);
+    return { ast: { op: 'manual', text: raw }, issues };
+  }
+  for (const v of atcValues(node)) {
+    if (!ATC7.test(v) && v.length === 7) {
+      if (ATC7.test(v.replace(/O/g, '0'))) issues.push(`ATC碼 ${v} 疑似字母O／數字0誤植，標示待確認，未修正`);
+      else issues.push(`ATC碼 ${v} 格式異常，待確認`);
+    }
+  }
+  return { ast: node, issues };
+}
+
+return { TRUE, FALSE, UNKNOWN, FIELDS, TEXT_OPS, QTY_OPS, LOGIC_OPS, validateRule, fieldsUsed, hasManual, canonical, ruleHash, Evaluator, describe, pendingReason, previewRule, parseRuleText };
+})();
+
+// ---- ui/ruleView.js ----
+const __m_ui_ruleView_js = (function () {
+// 規則編輯（條件點選，第8.1節）與範圍預覽。選項由已啟用主檔產生；同時顯示代碼與中文說明。首次不需看到JSON。
+const { h, table, clear } = __m_ui_dom_js;
+const R = __m_core_rules_js;
+const M = __m_core_masterImport_js;
+const { masterRows } = __m_ui_masterView_js;
+const { deepClone } = __m_core_util_js;
+const PAGE = 100;
+const OPTION_CACHE = new WeakMap();
+
+const TEMPLATES = [
+  ['group', '依分組', () => ({ field: 'group_code', op: 'in', values: [] })],
+  ['atc_dose', '依ATC加劑型', () => ({ op: 'and', children: [{ field: 'atc_code', op: 'in', values: [] }, { field: 'dose_code', op: 'in', values: [] }] })],
+  ['group_spec', '依分組加規格', () => ({ op: 'and', children: [{ field: 'group_code', op: 'in', values: [] }, { field: 'spec', op: 'eq', value: '', unit: '' }] })],
+  ['drugs', '指定品項', () => ({ field: 'drug_code', op: 'in', values: [] })],
+  ['advanced', '進階條件', () => ({ op: 'and', children: [] })],
+];
+
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+function newLeaf(field = 'group_code') {
+  return field === 'spec' ? { field: 'spec', op: 'eq', value: '', unit: '' } : { field, op: 'in', values: [] };
+}
+
+// 依目前運算子調整值欄位結構
+function setOp(node, op) {
+  const f = R.FIELDS[node.field];
+  node.op = op;
+  if (f.type === 'quantity') return;
+  const vals = node.values || (node.value ? [node.value] : []);
+  delete node.value; delete node.values;
+  if (op === 'in' || op === 'not_in') node.values = vals;
+  else node.value = vals[0] || '';
+}
+
+function setField(node, field) {
+  for (const k of Object.keys(node)) delete node[k];
+  Object.assign(node, newLeaf(field));
+}
+
+// holder：{rule}；opts：{rows, imp, onChange}
+function ruleEditor(env, holder, opts) {
+  const box = h('div', { class: 'rule-editor' });
+  const changed = () => { if (opts.onChange) opts.onChange(holder.rule); env.render(); };
+  const options = (col) => {
+    if (!opts.rows) return [];
+    let m = OPTION_CACHE.get(opts.rows);
+    if (!m) { m = new Map(); OPTION_CACHE.set(opts.rows, m); }
+    if (!m.has(col)) m.set(col, M.masterOptions(opts.rows, col));
+    return m.get(col);
+  };
+  const disabled = new Set((opts.imp && opts.imp.check && opts.imp.check.disabled_rule_fields) || []);
+
+  function picker(node) {
+    const f = R.FIELDS[node.field];
+    const multi = node.op === 'in' || node.op === 'not_in';
+    const prefix = node.op === 'starts_with' || node.op === 'not_starts_with';
+    const wrap = h('div', { class: 'picker' });
+    if (prefix) {
+      const inp = h('input', { type: 'text', size: 12, value: node.value || '', 'aria-label': `${f.label}前綴` });
+      inp.addEventListener('change', () => { node.value = inp.value.trim(); changed(); });
+      wrap.appendChild(inp);
+      const n = node.value ? options(f.col).filter((o) => o.value.startsWith(node.value)).length : 0;
+      if (node.value) wrap.appendChild(h('span', { class: 'note', text: ` 主檔中 ${n} 個${f.label}符合此前綴` }));
+      return wrap;
+    }
+    const chosen = multi ? node.values : (node.value ? [node.value] : []);
+    const opts2 = options(f.col);
+    const byVal = new Map(opts2.map((o) => [o.value, o]));
+    wrap.appendChild(h('div', { class: 'chips' }, chosen.map((v) => {
+      const o = byVal.get(v);
+      return h('span', { class: 'chip' + (o ? '' : ' chip-warn'), title: o ? '' : '主檔無此值' },
+        `${v}${o && o.label ? ' ' + o.label : ''}${o ? `（${o.count}筆）` : '（主檔無此值）'} `,
+        h('button', { type: 'button', class: 'chip-x', 'aria-label': `移除 ${v}`, text: '×', on: { click: () => {
+          if (multi) node.values = node.values.filter((x) => x !== v); else node.value = '';
+          changed();
+        } } }));
+    })));
+    const q = h('input', { type: 'text', size: 18, placeholder: `搜尋${f.label}或名稱`, 'aria-label': `搜尋${f.label}` });
+    const list = h('div', { class: 'pick-list' });
+    const showList = () => {
+      clear(list);
+      const s = q.value.trim().toUpperCase();
+      if (!s) return;
+      const hit = opts2.filter((o) => o.value.toUpperCase().includes(s) || (o.label && o.label.toUpperCase().includes(s))).slice(0, 50);
+      if (!hit.length) list.appendChild(h('div', { class: 'note', text: '主檔中無符合之值' }));
+      for (const o of hit) {
+        list.appendChild(h('button', { type: 'button', class: 'pick-item', text: `${o.value}　${o.label || ''}（${o.count}筆）`, on: { click: () => {
+          if (multi) { if (!node.values.includes(o.value)) node.values.push(o.value); } else node.value = o.value;
+          changed();
+        } } }));
+      }
+    };
+    q.addEventListener('input', showList);
+    wrap.appendChild(h('div', null, q));
+    wrap.appendChild(list);
+    if (multi) {
+      const ta = h('textarea', { rows: 2, cols: 30, placeholder: '貼上多個值（換行、逗號或空白分隔）', 'aria-label': `貼上${f.label}` });
+      wrap.appendChild(h('div', null, ta, ' ', env.btn('加入', () => {
+        const vals = ta.value.split(/[\s,，、]+/).map((x) => x.trim()).filter(Boolean);
+        for (const v of vals) if (!node.values.includes(v)) node.values.push(v);
+        changed();
+      })));
+    }
+    return wrap;
+  }
+
+  function leaf(node, onDelete) {
+    const f = R.FIELDS[node.field];
+    const fieldSel = h('select', { 'aria-label': '欄位' }, Object.entries(R.FIELDS).map(([k, x]) => h('option', { value: k, text: x.label + (disabled.has(k) ? '（此主檔未映射）' : ''), selected: k === node.field })));
+    fieldSel.addEventListener('change', () => { setField(node, fieldSel.value); changed(); });
+    const ops = f.type === 'quantity' ? R.QTY_OPS : R.TEXT_OPS;
+    const opSel = h('select', { 'aria-label': '運算子' }, Object.entries(ops).map(([k, x]) => h('option', { value: k, text: x, selected: k === node.op })));
+    opSel.addEventListener('change', () => { setOp(node, opSel.value); changed(); });
+    let valueEl;
+    if (f.type === 'quantity') {
+      const qty = h('input', { type: 'text', size: 8, value: node.value || '', 'aria-label': '規格數值' });
+      qty.addEventListener('change', () => { node.value = qty.value.trim(); changed(); });
+      const units = (opts.imp && opts.imp.check && opts.imp.check.known_units) || M.KNOWN_UNITS;
+      const used = options('spec_unit');
+      const unitSel = h('select', { 'aria-label': '規格單位' }, h('option', { value: '', text: '（選單位）' }),
+        used.map((o) => h('option', { value: o.value, text: `${o.value}（${o.count}筆）${units.includes(o.value) ? '' : '【未知單位】'}`, selected: o.value === node.unit })));
+      unitSel.addEventListener('change', () => { node.unit = unitSel.value; changed(); });
+      valueEl = h('span', null, qty, ' ', unitSel, h('span', { class: 'note', text: ' 只比較同單位；未經確認不換算' }));
+    } else {
+      valueEl = picker(node);
+    }
+    return h('div', { class: 'rule-leaf' + (disabled.has(node.field) ? ' rule-bad' : '') }, fieldSel, ' ', opSel, ' ', valueEl, ' ',
+      onDelete ? env.btn('刪除', onDelete) : null);
+  }
+
+  function group(node, onDelete, depth) {
+    if (node.op === 'manual') {
+      const ta = h('textarea', { rows: 2, cols: 50, 'aria-label': '人工條件原文' });
+      ta.value = node.text;
+      ta.addEventListener('change', () => { node.text = ta.value; changed(); });
+      return h('div', { class: 'rule-group rule-manual' }, h('strong', { text: '人工條件（不自動判定，相關品項一律待確認）' }), h('div', null, ta), onDelete ? env.btn('刪除', onDelete) : null);
+    }
+    if (node.op === 'not') {
+      return h('div', { class: 'rule-group rule-not' }, h('strong', { text: '排除下列條件：' }), ' ', onDelete ? env.btn('刪除排除', onDelete) : null,
+        render(node.child, null, depth + 1));
+    }
+    const logic = h('select', { 'aria-label': '組合方式' }, [['and', '全部符合（AND）'], ['or', '任一符合（OR）']].map(([k, x]) => h('option', { value: k, text: x, selected: k === node.op })));
+    logic.addEventListener('change', () => { node.op = logic.value; changed(); });
+    return h('div', { class: 'rule-group' }, h('div', { class: 'toolbar' }, logic,
+      env.btn('＋條件', () => { node.children.push(newLeaf()); changed(); }),
+      env.btn('＋群組', () => { node.children.push({ op: 'or', children: [newLeaf()] }); changed(); }),
+      env.btn('＋排除', () => { node.children.push({ op: 'not', child: newLeaf() }); changed(); }),
+      onDelete ? env.btn('刪除群組', onDelete) : null),
+    node.children.length ? null : h('p', { class: 'warn-text', text: '群組內尚無條件（空規則不得當作全選）' }),
+    node.children.map((c, i) => render(c, () => { node.children.splice(i, 1); changed(); }, depth + 1)));
+  }
+
+  function render(node, onDelete, depth = 0) {
+    if (node.op === 'and' || node.op === 'or' || node.op === 'not' || node.op === 'manual') return group(node, onDelete, depth);
+    return leaf(node, onDelete);
+  }
+
+  function draw() {
+    const tpl = h('div', { class: 'toolbar' }, h('span', { text: '常用範本：' }), TEMPLATES.map(([k, label, make]) => env.btn(label, () => { holder.rule = make(); changed(); })));
+    box.appendChild(tpl);
+    if (!holder.rule) { box.appendChild(h('p', { class: 'note', text: '請先選一個範本，再點選條件值。' })); return; }
+    const isGroup = ['and', 'or'].includes(holder.rule.op);
+    box.appendChild(render(holder.rule, null));
+    if (!isGroup && holder.rule.op !== 'not' && holder.rule.op !== 'manual') {
+      box.appendChild(h('div', { class: 'toolbar' }, env.btn('包成群組（加入其他條件）', () => { holder.rule = { op: 'and', children: [holder.rule] }; changed(); })));
+    }
+    let valid = null;
+    try { R.validateRule(holder.rule); } catch (e) { valid = e.message; }
+    box.appendChild(h('div', { class: 'rule-desc' }, h('strong', { text: '條件說明：' }), h('pre', { text: R.describe(holder.rule) }),
+      valid ? h('p', { class: 'warn-text', text: '條件尚未完整：' + valid }) : h('p', { class: 'note', text: '條件格式正確。' })));
+    const json = h('details', null, h('summary', { text: '進階：檢視條件結構（JSON）' }), h('pre', { text: JSON.stringify(holder.rule, null, 2) }));
+    box.appendChild(json);
+  }
+  draw();
+  return box;
+}
+
+// 預覽結果
+function previewPanel(env, pv, st) {
+  st.filter = st.filter || '';
+  st.page = st.page || 0;
+  const rows = pv.members.filter((m) => !st.filter || m.result === st.filter);
+  const pageRows = rows.slice(st.page * PAGE, (st.page + 1) * PAGE);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const fsel = h('select', { 'aria-label': '判定篩選' }, [['', '全部'], ['符合', '符合'], ['待確認', '待確認']].map(([k, x]) => h('option', { value: k, text: x, selected: k === st.filter })));
+  fsel.addEventListener('change', () => { st.filter = fsel.value; st.page = 0; env.render(); });
+  return h('section', { class: 'panel' }, h('h2', { text: '範圍預覽（認定範圍名單；不等於本次調高名單、不等於主檔註記名單）' }),
+    table(['項目', '結果'], [['主檔版本', `${pv.base_date}（${pv.import_id.slice(0, 8)}）`], ['符合', String(pv.match)], ['待確認', String(pv.pending)], ['規則雜湊', pv.rule_hash.slice(0, 16)]]),
+    pv.warnings.length ? h('ul', { class: 'warn-list' }, pv.warnings.map((w) => h('li', { class: 'warn-text', text: w }))) : null,
+    pv.groups.length ? h('div', null, h('h3', { text: `涉及分組（${pv.groups.length}）` }),
+      table(['分組代碼', '符合', '待確認', '分組總數', '涵蓋'], pv.groups.slice(0, 300).map((g) => [g.group_code, String(g.matched), String(g.pending), String(g.total), g.partial ? '部分涵蓋' : '全組']))) : null,
+    h('h3', { text: '品項名單' }),
+    h('div', { class: 'filters' }, h('label', null, '判定 ', fsel), h('span', { text: `共 ${rows.length} 筆` }),
+      env.btn('上一頁', () => { st.page -= 1; env.render(); }, { disabled: st.page === 0 }), h('span', { text: `第 ${st.page + 1}／${pages} 頁` }),
+      env.btn('下一頁', () => { st.page += 1; env.render(); }, { disabled: st.page >= pages - 1 })),
+    table(['藥品代碼', '品名', '藥商', '分組', '規格', '判定', '判定路徑', '主檔必要藥品註記'],
+      pageRows.map((m) => [m.drug_code, m.drug_name || '', m.firm || '', m.group_code || '', m.spec, m.result, m.path, m.annotation ?? ''])));
+}
+
+// 獨立之「規則預覽」頁（階段6起併入認定版本）
+function ruleTab(env) {
+  const { ui, s, btn, guard, render } = env;
+  ui.rule = ui.rule || { holder: { rule: null }, preview: null, pv: {} };
+  const st = ui.rule;
+  const d = data(env);
+  const imp = M.activeImport(d);
+  if (!imp) return h('section', { class: 'panel' }, h('h2', { text: '規則編輯與預覽' }), h('p', { text: '尚未有已啟用之主檔；請先至「主檔」頁匯入並啟用。' }));
+  const parts = [];
+  const head = h('section', { class: 'panel' }, h('h2', { text: '規則編輯與預覽' }),
+    h('p', { class: 'note', text: `選項來自目前主檔：${imp.source_name}（基準日 ${imp.base_date}）。條件以結構化方式保存，不執行使用者輸入。預覽後規則或主檔改變須重新預覽。` }));
+  parts.push(head);
+  if (!st.rows || st.rowsFor !== imp.id) {
+    head.appendChild(btn('載入主檔選項', () => guard(async () => { st.rows = await masterRows(s, imp); st.rowsFor = imp.id; })));
+    return parts;
+  }
+  head.appendChild(ruleEditor(env, st.holder, { rows: st.rows, imp, onChange: () => { st.preview = null; } }));
+  head.appendChild(h('div', { class: 'toolbar' }, btn('預覽符合名單', () => guard(async () => {
+    const t0 = Date.now();
+    st.preview = await R.previewRule(deepClone(st.holder.rule), st.rows, imp, { threshold: s.settings.large_scope_threshold });
+    st.preview.ms = Date.now() - t0;
+    st.pv = {};
+  }), { primary: true, disabled: !st.holder.rule })));
+  if (st.preview) {
+    parts.push(previewPanel(env, st.preview, st.pv));
+    head.appendChild(h('p', { class: 'note', text: `預覽耗時 ${st.preview.ms} ms。` }));
+  }
+  void render;
+  return parts;
+}
+
+return { TEMPLATES, ruleEditor, previewPanel, ruleTab };
 })();
 
 // ---- ui/main.js ----
@@ -4889,6 +5562,7 @@ const { MIN_KEYWORD_LENGTH } = __m_core_keyword_js;
 const { hasBusinessData } = __m_core_demo_js;
 const { casesTab, meetingsTab } = __m_ui_casesView_js;
 const { masterTab, masterStatusText } = __m_ui_masterView_js;
+const { ruleTab } = __m_ui_ruleView_js;
 const PROFILE_KEY = 'specdrug.profile';
 // 同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。使用者 2026-11-06 同意（單人使用）。
 const LOCAL_CLOSED_RELEASE = true;
@@ -5324,7 +5998,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -5509,7 +6183,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
