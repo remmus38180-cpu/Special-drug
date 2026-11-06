@@ -108,17 +108,41 @@ try {
   await p3.locator('dialog.dlg').waitFor({ timeout: 10000 });
   const t3 = await dlgText(p3);
   check('H07 重開提示復原草稿', t3.includes('復原草稿'), t3.replace(/\s+/g, ' ').slice(0, 60));
-  // 前一分頁關閉時已嘗試還牌 → 可立即取牌復原
+  // H19（同瀏覽器）：前一分頁關閉、還牌未完成 → 分頁鎖已釋放，視同已還牌（LOCAL_CLOSED_RELEASE）
   await clickDlg(p3, '取得編輯牌並復原');
-  // H19（來不及還牌）：關閉分頁時還牌不保證完成；他人（含同瀏覽器新分頁）於逾時前被擋
+  // 關閉分頁時還牌不保證完成：來得及→直接取牌；來不及→以分頁鎖判定前一分頁已關閉並提示
+  const took = await Promise.race([
+    p3.locator('dialog.dlg', { hasText: '先前的分頁' }).waitFor({ timeout: 15000 }).then(() => 'local'),
+    p3.locator('.statusbar', { hasText: '未儲存變更：1' }).waitFor({ timeout: 15000 }).then(() => 'released'),
+  ]);
+  check('H19 同瀏覽器前一分頁已關閉：立即取牌（' + (took === 'local' ? '還牌未完成，依分頁鎖判定' : '關閉時已還牌') + '）', true);
+  if (took === 'local') await clickDlg(p3, '確定');
+  await p3.locator('.statusbar', { hasText: '未儲存變更：1' }).waitFor({ timeout: 15000 });
+  check('H07 草稿復原', (await p3.locator('.statusbar').innerText()).includes('編輯中'));
+  await p3.getByRole('button', { name: '儲存', exact: true }).click();
+  await p3.locator('.statusbar', { hasText: 'r000002' }).waitFor({ timeout: 10000 });
+  await p3.getByRole('button', { name: '結束編輯' }).click();
+  await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });
+  check('H18 結束編輯→編輯牌無人持有', true);
+  // H17：模擬另一台電腦持牌（寫入編輯牌檔）
+  await p3.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const d = await (await root.getDirectoryHandle('f1')).getDirectoryHandle('control');
+    const f = await d.getFileHandle('editing.json');
+    const now = new Date().toISOString();
+    const w = await f.createWritable();
+    await w.write(JSON.stringify({ format: 'specdrug-editing', state: 'held', holder: { user: 'B002李小華', pc: 'PC-02' }, session_id: 'other-pc-session', acquired_at: now, heartbeat_seq: 1, heartbeat_at: now, base_revision: 2 }));
+    await w.close();
+  });
+  await p3.getByRole('button', { name: '開始編輯' }).click();
   await p3.locator('dialog.dlg', { hasText: '編輯牌在他人手上' }).waitFor({ timeout: 15000 });
   const t3b = await dlgText(p3);
-  check('H19 來不及還牌：逾時前被擋，提示持牌者、取牌時間、最後回應', t3b.includes('A001王小明') && t3b.includes('最後回應'), t3b.replace(/\s+/g, ' ').slice(0, 70));
+  check('H17 他人持牌：提示持牌者、電腦、取牌時間、最後回應', t3b.includes('B002李小華') && t3b.includes('PC-02') && t3b.includes('最後回應'), t3b.replace(/\s+/g, ' ').slice(0, 70));
   // H27／H26：錯誤關鍵詞不收回；正確關鍵詞＋原因收回
   await clickDlg(p3, '強制收回');
   let fd = p3.locator('dialog.dlg').last();
   await fd.locator('input[type=password]').fill('wrong');
-  await fd.locator('input[type=text]').fill('前一分頁已當機');
+  await fd.locator('input[type=text]').fill('對方請假');
   await clickDlg(p3, '強制收回');
   await p3.locator('dialog.dlg', { hasText: '關鍵詞不正確' }).waitFor();
   check('H27 錯誤關鍵詞不收回', true);
@@ -126,26 +150,22 @@ try {
   await p3.getByRole('button', { name: '強制收回' }).click();
   fd = p3.locator('dialog.dlg').last();
   await fd.locator('input[type=password]').fill('kw-1234');
-  await fd.locator('input[type=text]').fill('前一分頁已當機');
+  await fd.locator('input[type=text]').fill('對方請假');
   await clickDlg(p3, '強制收回');
   await p3.locator('dialog.dlg', { hasText: '已收回' }).waitFor({ timeout: 15000 });
   await clickDlg(p3, '確定');
-  await p3.locator('dialog.dlg', { hasText: '復原草稿' }).waitFor({ timeout: 10000 });
-  await clickDlg(p3, '復原');
-  await p3.locator('.statusbar', { hasText: '未儲存變更：1' }).waitFor({ timeout: 15000 });
-  check('H26 正確關鍵詞強制收回→編輯中；草稿復原', (await p3.locator('.statusbar').innerText()).includes('編輯中'));
-  await p3.getByRole('button', { name: '儲存', exact: true }).click();
-  await p3.locator('.statusbar', { hasText: 'r000002' }).waitFor({ timeout: 10000 });
+  await p3.locator('.statusbar', { hasText: '模式：編輯中' }).waitFor({ timeout: 15000 });
+  check('H26 正確關鍵詞強制收回→編輯中', true);
+  await p3.getByRole('button', { name: '結束編輯' }).click();
+  await p3.locator('.statusbar', { hasText: 'r000003' }).waitFor({ timeout: 10000 });
+  check('強制收回稽核於結束編輯時自動寫入新版本', true);
   await p3.getByRole('button', { name: '儲存歷程' }).click();
   await p3.getByRole('button', { name: '檢查全部版本檔' }).click();
   await p3.locator('td', { hasText: '目前版本' }).waitFor();
   const rows = await p3.locator('.panel table').first().locator('tbody tr').count();
   const okCount = await p3.locator('td', { hasText: '✔ 一致' }).count();
-  check('儲存歷程 3 個版本雜湊一致', rows === 3 && okCount === 3, `${rows} 列、${okCount} 一致`);
+  check('儲存歷程 4 個版本雜湊一致', rows === 4 && okCount === 4, `${rows} 列、${okCount} 一致`);
   check('稽核含強制收回紀錄', (await p3.locator('td', { hasText: '強制收回編輯牌' }).count()) >= 1);
-  await p3.getByRole('button', { name: '結束編輯' }).click();
-  await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });
-  check('H18 結束編輯→編輯牌無人持有', true);
 
   // 模擬資料：新資料夾載入
   await p3.getByRole('button', { name: '關閉資料夾' }).click();
@@ -218,6 +238,26 @@ try {
   await p3.getByRole('button', { name: '會議', exact: true }).click();
   await p3.locator('tr', { hasText: '模擬擬訂會議115年6月' }).click();
   check('會議詳情列出同次會議之3個議案', (await p3.locator('section.panel table tbody tr').count()) === 3);
+  // 階段4：主檔匯入（CSV）
+  await p3.getByRole('button', { name: '主檔', exact: true }).click();
+  const csvText = '\ufeffCODE,藥品名稱,藥商名稱,分組代碼,ATC7碼,PDOSE,複方藥品,規格量,規格單位,price11511,必要藥品\r\n' +
+    'A000001100,DRUG A1,甲,G1AAA0000001,J06BA01,20,N,5,ML,120,0\r\n0A00005100,DRUG Z,丙,G1BBB0000001,L04AA03,11,N,,,8.50,\r\nB000004100,DRUG C1,丁,G1CCC0000001,L04AA03,11,Y,1,VIAL,6,3\r\n';
+  await p3.locator('input[type=file]').first().setInputFiles({ name: '測試主檔11511.csv', mimeType: 'text/csv', buffer: Buffer.from(csvText, 'utf8') });
+  await p3.getByRole('button', { name: '讀取標題列' }).waitFor();
+  await p3.getByRole('button', { name: '讀取標題列' }).click();
+  await p3.getByLabel('資料基準日').fill('115/11/01');
+  await p3.getByLabel('資料基準日').press('Tab');
+  await p3.getByRole('button', { name: '試匯入（不改目前主檔）' }).click();
+  await p3.locator('p', { hasText: '試匯入完成' }).waitFor({ timeout: 15000 });
+  const chk = await p3.locator('section.panel', { hasText: '試匯入檢核結果' }).innerText();
+  check('主檔試匯入：3代碼、預選price11511、未知單位VIAL', chk.includes('代碼數\t3') && chk.includes('VIAL'), chk.replace(/\s+/g, ' ').slice(0, 120));
+  await p3.getByRole('button', { name: '確認並啟用此版本' }).click();
+  await clickDlg(p3, '啟用');
+  await p3.locator('p', { hasText: '已啟用' }).waitFor({ timeout: 15000 });
+  await p3.getByRole('button', { name: '儲存', exact: true }).click();
+  await p3.locator('.statusbar', { hasText: '主檔：測試主檔11511.csv（基準日 2026-11-01，3 筆）' }).waitFor({ timeout: 10000 });
+  check('主檔啟用並儲存；狀態列顯示目前主檔版本', true);
+  check('歷史版本：停用示範主檔', (await p3.locator('td', { hasText: '已停用' }).count()) === 1);
   await p3.getByRole('button', { name: '首頁', exact: true }).click();
   await p3.getByRole('button', { name: '結束編輯' }).click();
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });

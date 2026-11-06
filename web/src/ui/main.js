@@ -13,10 +13,11 @@ import { settingLabel, DEFAULT_SETTINGS } from '../core/dataset.js';
 import { MIN_KEYWORD_LENGTH } from '../core/keyword.js';
 import { hasBusinessData } from '../core/demo.js';
 import { casesTab, meetingsTab } from './casesView.js';
+import { masterTab, masterStatusText } from './masterView.js';
 
 const PROFILE_KEY = 'specdrug.profile';
-// 設計建議（待使用者同意）：同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。預設關閉。
-const LOCAL_CLOSED_RELEASE = false;
+// 同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。使用者 2026-11-06 同意（單人使用）。
+const LOCAL_CLOSED_RELEASE = true;
 const LAST_FOLDER_KEY = 'folder:last';
 
 const ui = {
@@ -414,7 +415,7 @@ function renderStatusBar() {
   bar.appendChild(h('span', { class: st.tokenUncertain ? 'warn-text' : '', text: tokText }));
   if (st.revision !== undefined && st.revision !== null) bar.appendChild(h('span', { text: `${revLabel(st.revision)}｜${fmtIso(st.savedAt)}` }));
   bar.appendChild(h('span', { class: st.unsaved ? 'warn-text' : '', text: `未儲存變更：${st.unsaved}${st.pendingAudit && !st.unsaved ? `（待寫入稽核 ${st.pendingAudit} 筆）` : ''}` }));
-  bar.appendChild(h('span', { text: '主檔：尚未匯入' }));
+  bar.appendChild(h('span', { text: masterStatusText(s.committed.data) }));
   if (st.newerAvailable) bar.appendChild(h('span', { class: 'chip chip-warn', text: '資料夾有新版，請重新載入' }));
   return bar;
 }
@@ -449,7 +450,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -634,7 +635,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 

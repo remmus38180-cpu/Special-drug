@@ -3,6 +3,7 @@
 import { SpecError } from './errors.js';
 import { insert, setConfirmStatus, setDedicated, list, SCHEMA } from './model.js';
 import { masterPath } from './paths.js';
+import { ROW_FIELDS, normAnnotation } from './masterImport.js';
 
 export const DEMO_MASTER_COLUMNS = ['drug_code', 'drug_name', 'firm', 'group_code', 'atc_code', 'dose_code', 'dose_name', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation_raw'];
 
@@ -25,12 +26,13 @@ export function demoMasterFile(importId) {
     const o = {};
     DEMO_MASTER_COLUMNS.forEach((c, j) => { o[c] = r[j] === '' ? null : r[j]; });
     o.drug_code_raw = o.drug_code;
+    o.annotation = normAnnotation(o.annotation_raw);
     o.source_row = i + 2;
-    return o;
+    return ROW_FIELDS.map((f) => (o[f] === undefined ? null : o[f]));
   });
   const file = {
     format: 'specdrug-master', import_id: importId, source_name: '模擬主檔.csv', base_date: '2026-10-01',
-    columns: DEMO_MASTER_COLUMNS, rows,
+    source_sha256: null, fields: ROW_FIELDS, rows,
   };
   return { path: masterPath(importId), text: JSON.stringify(file) + '\n', rowCount: rows.length };
 }
