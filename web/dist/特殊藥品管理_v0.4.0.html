@@ -6,7 +6,7 @@
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
 <meta name="build-date" content="2026-11-07">
-<meta name="commit" content="da095b6">
+<meta name="commit" content="5f77ea7">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -452,7 +452,7 @@ const __m_core_version_js = (function () {
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
 const BUILD_DATE = "2026-11-07";
-const BUILD_COMMIT = "da095b6";
+const BUILD_COMMIT = "5f77ea7";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -479,6 +479,7 @@ const DEFAULT_SETTINGS = {
   large_scope_threshold: 500,
   scope_exclude_code_prefixes: 'TPN',
   scope_exclude_web_hidden: true,
+  annotation_code_map: '不可替代特殊藥品=3, 特殊藥品=4',
 };
 
 const SETTING_RULES = {
@@ -491,7 +492,20 @@ const SETTING_RULES = {
   large_scope_threshold: { type: 'int', min: 1, max: 100000, label: '範圍過大警示門檻（筆）' },
   scope_exclude_code_prefixes: { type: 'text', max: 200, label: '範圍全域排除：藥品代碼前綴（逗號分隔）' },
   scope_exclude_web_hidden: { type: 'bool', label: '範圍全域排除：不上網註＝Y' },
+  annotation_code_map: { type: 'text', max: 200, label: '認定類別↔主檔必要藥品註記代碼（類別=代碼，逗號分隔）', check: checkCodeMap },
 };
+
+function checkCodeMap(v) {
+  const parts = v.split(/[,，;；]+/).map((x) => x.trim()).filter(Boolean);
+  const seen = new Set();
+  for (const p of parts) {
+    const m = /^(不可替代特殊藥品|特殊藥品)\s*=\s*([A-Za-z0-9]{1,4})$/.exec(p);
+    if (!m) return `「${p}」格式應為「不可替代特殊藥品=3」或「特殊藥品=4」`;
+    if (seen.has(m[1])) return `類別「${m[1]}」重複`;
+    seen.add(m[1]);
+  }
+  return null;
+}
 
 function settingLabel(key) {
   return SETTING_RULES[key] ? SETTING_RULES[key].label : key;
@@ -522,7 +536,9 @@ function validateSettingsPatch(current, patch) {
       }
     } else if (rule.type === 'text') {
       v = String(raw ?? '').trim();
-      if (v.length > rule.max || /[^A-Za-z0-9,，、\s]/.test(v)) throw new SpecError('BAD_VALUE', `${rule.label}只可填英數字，以逗號分隔`);
+      if (v.length > rule.max) throw new SpecError('BAD_VALUE', `${rule.label}過長`);
+      if (rule.check) { const m = rule.check(v); if (m) throw new SpecError('BAD_VALUE', `${rule.label}：${m}`); }
+      else if (/[^A-Za-z0-9,，、\s]/.test(v)) throw new SpecError('BAD_VALUE', `${rule.label}只可填英數字，以逗號分隔`);
     } else {
       if (typeof raw !== 'boolean') throw new SpecError('BAD_VALUE', `${rule.label}須為是／否`);
       v = raw;
@@ -5583,6 +5599,235 @@ function ruleTab(env) {
 return { TEMPLATES, ruleEditor, previewPanel, ruleTab };
 })();
 
+// ---- core/xlsxWrite.js ----
+const __m_core_xlsxWrite_js = (function () {
+// xlsx 寫入（自行實作，stored zip）。儲存格：字串、{n:'12.5'}數值文字、{date:'YYYY-MM-DD'}日期。
+// 文字一律以 inlineStr 寫入，不被Excel當公式；匯出時另於呼叫端防公式注入。
+const { writeZip } = __m_core_zip_js;
+const { colName } = __m_core_xlsx_js;
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+    // XML 1.0 不允許之控制字元
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, (c) => `_x${c.charCodeAt(0).toString(16).padStart(4, '0').toUpperCase()}_`);
+}
+
+function serial(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return (Date.UTC(y, m - 1, d) - Date.UTC(1899, 11, 30)) / 86400000;
+}
+
+function sheetXml(rows) {
+  const out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'];
+  rows.forEach((row, ri) => {
+    const r = ri + 1;
+    out.push(`<row r="${r}">`);
+    row.forEach((v, ci) => {
+      if (v === null || v === undefined || v === '') return;
+      const ref = colName(ci) + r;
+      if (typeof v === 'object' && v.n !== undefined) out.push(`<c r="${ref}"><v>${esc(v.n)}</v></c>`);
+      else if (typeof v === 'object' && v.date) out.push(`<c r="${ref}" s="1"><v>${serial(v.date)}</v></c>`);
+      else out.push(`<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(v)}</t></is></c>`);
+    });
+    out.push('</row>');
+  });
+  out.push('</sheetData></worksheet>');
+  return out.join('');
+}
+
+// sheets：[{name, rows}]；props：{title, author, created(ISO), subject, custom:{名:值}}
+function writeXlsx(sheets, props = {}) {
+  const ns = 'http://schemas.openxmlformats.org';
+  const files = [];
+  const ct = [`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="${ns}/package/2006/content-types">`,
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+    '<Default Extension="xml" ContentType="application/xml"/>',
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
+    '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
+    '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>'];
+  sheets.forEach((s, i) => ct.push(`<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`));
+  ct.push('</Types>');
+  files.push({ name: '[Content_Types].xml', data: ct.join('') });
+  files.push({ name: '_rels/.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${ns}/package/2006/relationships"><Relationship Id="rId1" Type="${ns}/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="${ns}/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="${ns}/officeDocument/2006/relationships/custom-properties" Target="docProps/custom.xml"/></Relationships>` });
+  files.push({ name: 'xl/workbook.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="${ns}/spreadsheetml/2006/main" xmlns:r="${ns}/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${esc(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>` });
+  files.push({ name: 'xl/_rels/workbook.xml.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${ns}/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="${ns}/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="${ns}/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` });
+  files.push({ name: 'xl/styles.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="${ns}/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Microsoft JhengHei"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>` });
+  sheets.forEach((s, i) => files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheetXml(s.rows) }));
+  const created = props.created || new Date(0).toISOString();
+  files.push({ name: 'docProps/core.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<cp:coreProperties xmlns:cp="${ns}/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${esc(props.title || '')}</dc:title><dc:subject>${esc(props.subject || '')}</dc:subject><dc:creator>${esc(props.author || '')}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${esc(created.replace(/\.\d+Z$/, 'Z'))}</dcterms:created></cp:coreProperties>` });
+  const custom = Object.entries(props.custom || {}).map(([k, v], i) => `<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="${i + 2}" name="${esc(k)}"><vt:lpwstr>${esc(v)}</vt:lpwstr></property>`).join('');
+  files.push({ name: 'docProps/custom.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Properties xmlns="${ns}/officeDocument/2006/custom-properties" xmlns:vt="${ns}/officeDocument/2006/docPropsVTypes">${custom}</Properties>` });
+  return writeZip(files);
+}
+
+return { writeXlsx };
+})();
+
+// ---- core/exporter.js ----
+const __m_core_exporter_js = (function () {
+// 匯出（第11.5節）：檔名規則、xlsx「匯出說明」工作表與文件屬性、CSV 說明列（或另產 _說明.txt）、資料夾匯出紀錄 logs/export-log.jsonl、依 SHA-256 反查。
+// 匯出不改變業務資料、不產生未儲存變更。
+const { SpecError } = __m_core_errors_js;
+const { APP_VERSION, SCHEMA_VERSION, BUILD_COMMIT } = __m_core_version_js;
+const { writeXlsx } = __m_core_xlsxWrite_js;
+const { sha256Bytes, utf8, pad, isoUtc, taipeiDisplay } = __m_core_util_js;
+const { P } = __m_core_paths_js;
+const EXPORT_KINDS = ['認定清單', '品項明細', '差異待辦', '查詢結果', '移轉核對', '備份'];
+
+function stamp(ms) {
+  const t = new Date(ms + 8 * 3600 * 1000);
+  return `${t.getUTCFullYear()}${pad(t.getUTCMonth() + 1)}${pad(t.getUTCDate())}-${pad(t.getUTCHours())}${pad(t.getUTCMinutes())}${pad(t.getUTCSeconds())}`;
+}
+
+function revisionTag(revision, unsaved) {
+  return `r${String(revision || 0).padStart(6, '0')}${unsaved ? '+未儲存' : ''}`;
+}
+
+// 同一秒內同類檔案再次匯出加 -2、-3（計數保留於本分頁）
+class ExportNamer {
+  constructor() { this.seen = new Map(); }
+  name(kind, ms, revision, unsaved, ext) {
+    if (!EXPORT_KINDS.includes(kind)) throw new SpecError('BAD_VALUE', `匯出種類不正確：${kind}`);
+    const st = stamp(ms);
+    const key = `${kind}|${st}|${ext}`;
+    const n = (this.seen.get(key) || 0) + 1;
+    this.seen.set(key, n);
+    return `特藥_${kind}_${st}${n > 1 ? '-' + n : ''}_${revisionTag(revision, unsaved)}.${ext}`;
+  }
+}
+
+// info：{kind, ms, actor, revision, unsaved, versionSha, master:{base_date, source_name, sha256}, condition, day, count}
+function infoRows(info) {
+  return [
+    ['匯出內容', info.kind],
+    ['匯出時間（台北）', taipeiDisplay(info.ms)],
+    ['匯出時間（UTC）', isoUtc(info.ms)],
+    ['操作者', info.actor || ''],
+    ['程式版本', `${APP_VERSION}（${BUILD_COMMIT}）`],
+    ['資料結構版本', String(SCHEMA_VERSION)],
+    ['資料revision', revisionTag(info.revision, info.unsaved) + (info.unsaved ? '（含未儲存變更，非已儲存版本內容）' : '')],
+    ['版本檔SHA-256前16碼', info.versionSha ? info.versionSha.slice(0, 16) : ''],
+    ['主檔版本與資料基準日', info.master ? `${info.master.base_date}（${info.master.source_name}，${(info.master.sha256 || '').slice(0, 8)}）` : '（無已啟用主檔）'],
+    ['查詢條件', info.condition || '（無）'],
+    ['查詢日期', info.day || ''],
+    ['筆數', String(info.count)],
+  ];
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  let s = typeof v === 'object' ? (v.n !== undefined ? v.n : v.date !== undefined ? v.date : JSON.stringify(v)) : String(v);
+  if (/^[=+@]/.test(s)) s = "'" + s; // 防公式注入；代碼與金額不以此開頭
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function csvText(headers, rows) {
+  return [headers, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+
+// 產出匯出檔（不寫入資料夾）；回傳 [{name, bytes, mime}]
+function buildExport({ format, info, headers, rows, sheetName, csvNotes = true, namer }) {
+  const nm = namer || new ExportNamer();
+  const meta = infoRows(info);
+  if (format === 'xlsx') {
+    const name = nm.name(info.kind, info.ms, info.revision, info.unsaved, 'xlsx');
+    const bytes = writeXlsx([{ name: '匯出說明', rows: meta }, { name: sheetName || info.kind, rows: [headers, ...rows] }], {
+      title: info.kind, author: info.actor || '', created: isoUtc(info.ms), subject: info.condition || '',
+      custom: { 程式版本: APP_VERSION, 資料結構版本: String(SCHEMA_VERSION), 資料revision: revisionTag(info.revision, info.unsaved), 主檔基準日: info.master ? info.master.base_date : '' },
+    });
+    return [{ name, bytes, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }];
+  }
+  if (format !== 'csv') throw new SpecError('BAD_VALUE', `匯出格式不正確：${format}`);
+  const name = nm.name(info.kind, info.ms, info.revision, info.unsaved, 'csv');
+  const body = csvText(headers, rows);
+  const notes = meta.map(([k, v]) => `# ${k}：${v}`).join('\r\n') + '\r\n';
+  const bom = '﻿';
+  if (csvNotes) return [{ name, bytes: utf8(bom + notes + body), mime: 'text/csv' }];
+  return [{ name, bytes: utf8(bom + body), mime: 'text/csv' }, { name: name.replace(/\.csv$/, '_說明.txt'), bytes: utf8(bom + notes), mime: 'text/plain' }];
+}
+
+// 匯出紀錄：每檔一列追加；寫入失敗由呼叫端提示，不影響已下載檔案
+async function logExport(fs, file, info) {
+  const entry = {
+    exported_at: isoUtc(info.ms), file_name: file.name, kind: info.kind, condition: info.condition || null, count: info.count,
+    revision: info.revision, unsaved: !!info.unsaved, app_version: APP_VERSION, schema_version: SCHEMA_VERSION, actor: info.actor || null,
+    sha256: await sha256Bytes(file.bytes),
+  };
+  const cur = await fs.read(P.EXPORT_LOG);
+  const text = (cur ? cur.text : '') + JSON.stringify(entry) + '\n';
+  await fs.write(P.EXPORT_LOG, text);
+  return entry;
+}
+
+async function readExportLog(fs) {
+  const r = await fs.read(P.EXPORT_LOG);
+  if (!r) return [];
+  const out = [];
+  for (const line of r.text.split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch (e) { out.push({ broken: true, raw: line.slice(0, 80) }); }
+  }
+  return out;
+}
+
+async function findExportBySha(fs, sha) {
+  const s = String(sha || '').trim().toLowerCase();
+  return (await readExportLog(fs)).filter((e) => e.sha256 === s);
+}
+
+return { EXPORT_KINDS, revisionTag, ExportNamer, infoRows, csvText, buildExport, logExport, readExportLog, findExportBySha };
+})();
+
+// ---- ui/exportUI.js ----
+const __m_ui_exportUI_js = (function () {
+// 匯出共用流程：選格式→有未儲存變更先提示→另存對話框帶預設檔名→寫入匯出紀錄（失敗僅提示）。
+const { h, dialog, alertBox } = __m_ui_dom_js;
+const { saveBlobAs } = __m_ui_files_js;
+const X = __m_core_exporter_js;
+const M = __m_core_masterImport_js;
+const { actorText } = __m_core_model_js;
+const namer = new X.ExportNamer();
+
+function data(s) {
+  return s.mode === 'edit' ? s.work : s.committed.data;
+}
+
+// spec：{kind, condition, day, headers, rows, sheetName}
+async function exportTable(s, spec) {
+  const unsaved = s.mode === 'edit' && s.dirty > 0;
+  const fmt = h('select', { 'aria-label': '匯出格式' }, h('option', { value: 'xlsx', text: 'Excel（.xlsx）' }), h('option', { value: 'csv', text: 'CSV（UTF-8）' }));
+  const ok = await dialog(`匯出${spec.kind}`, [
+    h('p', { text: `共 ${spec.rows.length} 筆。條件：${spec.condition || '（無）'}` }),
+    unsaved ? h('p', { class: 'warn-text', text: `目前有 ${s.dirty} 項未儲存變更；匯出內容含未儲存資料，檔名將標示「+未儲存」。建議先儲存再匯出。` }) : null,
+    h('label', null, '格式 ', fmt),
+    h('p', { class: 'note', text: '將以「另存」對話框帶入預設檔名；檔名可改，檔內「匯出說明」仍保留版本資訊。' })],
+  [{ label: '取消', value: false }, { label: '匯出', value: true, primary: true }]);
+  if (!ok) return null;
+  const d = data(s);
+  const imp = M.activeImport(d);
+  const info = {
+    kind: spec.kind, ms: Date.now(), actor: actorText(s.session), revision: s.current ? s.current.revision : 0, unsaved,
+    versionSha: s.current ? s.current.sha256 : null, master: imp ? { base_date: imp.base_date, source_name: imp.source_name, sha256: imp.sha256 } : null,
+    condition: spec.condition, day: spec.day, count: spec.rows.length,
+  };
+  const files = X.buildExport({ format: fmt.value, info, headers: spec.headers, rows: spec.rows, sheetName: spec.sheetName, csvNotes: s.settings.csv_header_notes !== false, namer });
+  const saved = [];
+  for (const f of files) {
+    const r = await saveBlobAs(f.name, new Blob([f.bytes], { type: f.mime }));
+    if (!r || !r.saved) break;
+    saved.push(f);
+  }
+  const fails = [];
+  for (const f of saved) {
+    try { await X.logExport(s.fs, f, info); } catch (e) { fails.push(f.name); }
+  }
+  if (fails.length) await alertBox('匯出紀錄未寫入', `檔案已匯出，但寫入資料夾匯出紀錄失敗：${fails.join('、')}`, '可能為查詢模式無寫入權；不影響已下載檔案。');
+  return saved;
+}
+
+return { exportTable };
+})();
+
 // ---- core/recognition.js ----
 const __m_core_recognition_js = (function () {
 // 認定項目、認定版本、範圍快照、分組調價方式、衝突判斷、依日期查詢（第6、8、9.2節）。
@@ -5992,374 +6237,6 @@ function confirmGroupTreatment(data, ctx, id) {
 }
 
 return { createRecognition, updateRecognition, createRevision, updateRevision, addRevisionDecision, submitRevision, withdrawRevision, saveSnapshot, snapshotMemberList, setMemberDecision, pendingReasonCounts, bulkMemberDecision, snapshotFinal, revisionScope, snapshotAddedCodes, confirmSnapshot, revokeSnapshot, confirmedSnapshotOf, categoryConflicts, confirmRevision, statusOn, revisionHistory, drugRecognitions, drugCategoryOn, listRecognitions, setGroupTreatment, confirmGroupTreatment };
-})();
-
-// ---- ui/recognitionView.js ----
-const __m_ui_recognitionView_js = (function () {
-// 認定清單、認定詳情（版本、適用條件、快照與人工確認、確認、分組調價方式、歷程）（第9.2、10節）。
-const { h, table, dialog } = __m_ui_dom_js;
-const { formDialog, opts } = __m_ui_forms_js;
-const RC = __m_core_recognition_js;
-const R = __m_core_rules_js;
-const M = __m_core_masterImport_js;
-const { E, find, list } = __m_core_model_js;
-const { taipeiToday } = __m_core_values_js;
-const { newId, deepClone } = __m_core_util_js;
-const { ruleEditor, previewPanel } = __m_ui_ruleView_js;
-const { masterRows } = __m_ui_masterView_js;
-const PAGE = 100;
-
-function data(env) {
-  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
-}
-
-function today() {
-  return taipeiToday(Date.now());
-}
-
-function period(a, b) {
-  return `${a || '（起日未知）'} ～ ${b || ''}`;
-}
-
-function recognitionTab(env) {
-  env.ui.recog = env.ui.recog || { keyword: null, day: today(), selected: null, rev: null };
-  return env.ui.recog.selected ? detail(env) : listView(env);
-}
-
-function listView(env) {
-  const { s, ui, btn, guard, render } = env;
-  const st = ui.recog;
-  const d = data(env);
-  const kw = h('input', { type: 'text', size: 18, value: st.keyword || '', placeholder: '名稱、編號、藥品代碼、分組', 'aria-label': '認定關鍵字' });
-  const day = h('input', { type: 'text', size: 12, value: st.day, 'aria-label': '查詢日期' });
-  const rows = RC.listRecognitions(d, { keyword: st.keyword, day: st.day });
-  const t = table(['編號', '名稱', '類別', `狀態（${st.day}）`, '涵蓋品項數', '草稿／待確認版本', '最後更新'], []);
-  for (const r of rows) {
-    t.querySelector('tbody').appendChild(h('tr', { class: 'clickable', tabindex: '0', on: { click: () => { st.selected = r.id; st.rev = null; render(); } } },
-      [r.recognition_no, r.name, r.category || '', r.state, String(r.drug_count), String(r.pending_revisions), r.last_updated].map((x) => h('td', { text: x }))));
-  }
-  return h('section', { class: 'panel' }, h('h2', { text: '認定清單' }),
-    h('div', { class: 'filters' }, h('label', null, '關鍵字 ', kw), h('label', null, '查詢日期 ', day),
-      btn('查詢', () => { st.keyword = kw.value.trim() || null; st.day = day.value.trim() || today(); render(); })),
-    s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('新增認定項目', () => guard(() => newRecognition(env)), { primary: true })) : null,
-    h('p', { class: 'note', text: `共 ${rows.length} 項。有效狀態依查詢日期計算；未到生效日之已確認版本顯示待生效。` }), t);
-}
-
-async function newRecognition(env) {
-  const v = await formDialog('新增認定項目', [
-    { key: 'name', label: '認定名稱', required: true }, { key: 'unit', label: '管理單位', type: 'select', options: [['', '（未填）'], ['核價', '核價'], ['調價', '調價']] },
-    { key: 'description', label: '說明', type: 'textarea' },
-    { type: 'note', label: '建立前請先搜尋既有認定項目；同一認定之變更請建立新版本，避免重複認定。' }]);
-  if (!v) return;
-  const r = await env.s.run((d, k) => RC.createRecognition(d, k, { ...v, unit: v.unit || null }));
-  env.ui.recog.selected = r.id;
-}
-
-function revisionFields(rev = {}, d, caseOptions) {
-  return [
-    { key: 'category', label: '認定類別', type: 'select', options: opts(E.REV_CATEGORY), value: rev.category || '特殊藥品', required: true },
-    { key: 'scope_text', label: '適用範圍原文', type: 'textarea', value: rev.scope_text },
-    { key: 'conditions_text', label: '附帶條件', type: 'textarea', value: rev.conditions_text },
-    { key: 'effective_from', label: '生效日（起日含）', type: 'date', value: rev.effective_from, hint: '未知請留空，不以會議日補填' },
-    { key: 'effective_to', label: '迄日（不含）', type: 'date', value: rev.effective_to, hint: '空白代表無已知終止日，不代表永久有效' },
-    { key: 'case_id', label: '相關案件', type: 'select', options: [['', '（無）'], ...caseOptions], value: rev.case_id || '' },
-  ];
-}
-
-function caseOptions(d) {
-  return list(d, 'case_record').map((c) => [c.id, `${c.case_no} ${c.subject}`]);
-}
-
-function decisionOptions(d) {
-  return list(d, 'decision').map((x) => {
-    const a = find(d, 'meeting_agenda', x.agenda_id) || {};
-    const m = find(d, 'meeting', a.meeting_id) || {};
-    const c = find(d, 'case_record', a.case_id) || {};
-    return [x.id, `${c.case_no || ''}｜${m.meeting_date || '日期未知'} ${m.name || ''}｜${x.nature}：${x.result}`];
-  });
-}
-
-async function newRevision(env, rec, base) {
-  const d = data(env);
-  const fields = revisionFields(base ? { ...base, effective_from: null, effective_to: null } : {}, d, caseOptions(d));
-  fields.push({ key: 'decision_ids', label: '依據決議', type: 'checks', options: decisionOptions(d), value: [] });
-  if (base) fields.unshift({ key: 'correction_reason', label: '更正原因', required: true });
-  const v = await formDialog(base ? `更正版本（取代第${base.revision_no}版，原版本保留）` : '新增認定版本', fields, {
-    intro: base ? '適用條件沿用原版本，可於建立後修改；確認前須重新建立並確認快照。' : '建立後再設定適用條件（規則）並預覽建立快照。',
-  });
-  if (!v) return;
-  const rev = await env.s.run((dd, k) => RC.createRevision(dd, k, rec.id, {
-    ...v, case_id: v.case_id || null, rule: base ? deepClone(base.rule) : null, original_category: base ? base.original_category : null,
-    supersedes_id: base ? base.id : null,
-  }));
-  env.ui.recog.rev = rev.id;
-}
-
-async function cancelRevision(env, rec) {
-  const d = data(env);
-  const v = await formDialog('建立取消認定版本', [
-    { key: 'effective_from', label: '取消生效日', type: 'date', hint: '未知請留空並標示不完整' },
-    { key: 'decision_ids', label: '依據決議', type: 'checks', options: decisionOptions(d), value: [] },
-    { key: 'scope_text', label: '取消依據原文', type: 'textarea' },
-    { type: 'note', label: '取消認定須另有依據（B15、Q07）；不自動取消品項註記或調價路徑，相關事件另行登錄。' }]);
-  if (!v) return;
-  const rev = await env.s.run((dd, k) => RC.createRevision(dd, k, rec.id, { ...v, category: '取消認定' }));
-  env.ui.recog.rev = rev.id;
-}
-
-function detail(env) {
-  const { s, ui, btn, guard, render } = env;
-  const st = ui.recog;
-  const d = data(env);
-  const rec = find(d, 'recognition', st.selected);
-  if (!rec) { st.selected = null; return listView(env); }
-  const editing = s.mode === 'edit';
-  const hist = RC.revisionHistory(d, rec.id, st.day);
-  const status = RC.statusOn(d, rec.id, st.day);
-  const parts = [];
-  parts.push(h('section', { class: 'panel' },
-    h('div', { class: 'toolbar' }, btn('← 回認定清單', () => { st.selected = null; render(); })),
-    h('h2', { text: `${rec.recognition_no}｜${rec.name}` }),
-    h('p', { text: `${st.day} 狀態：${status.state}${status.revision ? `（第${status.revision.revision_no}版，${status.revision.category}）` : ''}` }),
-    rec.description ? h('p', { class: 'note', text: rec.description }) : null,
-    h('h3', { text: '版本與歷程' }),
-    table(['版', '類別', '期間（起含迄不含）', `狀態（${st.day}）`, '完整性', '範圍品項', '快照', ''], hist.map((r) => {
-      const snaps = list(d, 'scope_snapshot').filter((x) => x.revision_id === r.id);
-      return [String(r.revision_no) + (r.supersedes_id ? '（更正）' : ''), r.category, period(r.effective_from, r.period_end), r.state, r.completeness,
-        String(r.rule ? RC.revisionScope(d, r.id).size : 0), `${snaps.filter((x) => x.status === '已確認').length}/${snaps.length}`,
-        btn(st.rev === r.id ? '已開啟' : '開啟', () => { st.rev = r.id; st.preview = null; render(); }, { disabled: st.rev === r.id })];
-    })),
-    editing ? h('div', { class: 'toolbar' },
-      btn('新增版本', () => guard(() => newRevision(env, rec)), { primary: !hist.length }),
-      btn('建立取消認定版本', () => guard(() => cancelRevision(env, rec)), { disabled: !hist.some((x) => x.confirm_status === '已確認') })) : null));
-  const rev = st.rev ? find(d, 'recognition_revision', st.rev) : null;
-  if (rev) parts.push(...revisionPanel(env, rec, rev));
-  return parts;
-}
-
-function revisionPanel(env, rec, rev) {
-  const { s, ui, btn, guard } = env;
-  const st = ui.recog;
-  const d = data(env);
-  const editing = s.mode === 'edit';
-  const draft = rev.confirm_status === '草稿' || rev.confirm_status === '待確認';
-  const decs = list(d, 'revision_decision').filter((x) => x.revision_id === rev.id).map((x) => find(d, 'decision', x.decision_id)).filter(Boolean);
-  const decLabel = new Map(decisionOptions(d));
-  const caseRec = rev.case_id ? find(d, 'case_record', rev.case_id) : null;
-  const out = [];
-  const box = h('section', { class: 'panel' }, h('h2', { text: `第 ${rev.revision_no} 版（${rev.confirm_status}）` }),
-    table(['項目', '內容'], [
-      ['類別', rev.category + (rev.original_category ? `（原始：${rev.original_category}）` : '')],
-      ['期間', period(rev.effective_from, rev.effective_to)], ['完整性', rev.completeness],
-      ['適用範圍原文', rev.scope_text || ''], ['附帶條件', rev.conditions_text || ''],
-      ['相關案件', caseRec ? `${caseRec.case_no} ${caseRec.subject}` : ''],
-      ['依據決議', decs.map((x) => decLabel.get(x.id)).join('；')],
-      ['更正', rev.supersedes_id ? `取代版本 ${(find(d, 'recognition_revision', rev.supersedes_id) || {}).revision_no}；原因：${rev.correction_reason}` : ''],
-      ['確認', rev.confirmed_by ? `${rev.confirmed_by}，${rev.confirmed_at}` : ''], ['撤銷原因', rev.revoke_reason || ''],
-    ]),
-    h('h3', { text: '適用條件' }),
-    rev.rule ? h('pre', { class: 'rule-text', text: R.describe(rev.rule) }) : h('p', { class: 'note', text: rev.category === '取消認定' ? '取消認定版本不需適用條件。' : '尚未設定適用條件。' }));
-  if (editing && draft) {
-    box.appendChild(h('div', { class: 'toolbar' },
-      btn('修改版本資料', () => guard(async () => {
-        const v = await formDialog('修改認定版本', [...revisionFields(rev, d, caseOptions(d)), { key: 'reason', label: '修改原因' }]);
-        if (!v) return;
-        const { reason, ...ch } = v;
-        ch.case_id = ch.case_id || null;
-        await s.run((dd, k) => RC.updateRevision(dd, k, rev.id, ch, { expectedVersion: rev.row_version, reason }));
-      })),
-      btn('連結依據決議', () => guard(async () => {
-        const v = await formDialog('連結依據決議', [{ key: 'id', label: '決議', type: 'select', options: decisionOptions(d), required: true }]);
-        if (v) await s.run((dd, k) => RC.addRevisionDecision(dd, k, rev.id, v.id));
-      })),
-      rev.category !== '取消認定' ? btn(st.editRule ? '關閉條件編輯' : '編輯適用條件', () => { st.editRule = !st.editRule; st.ruleHolder = { rule: deepClone(rev.rule) }; env.render(); }) : null,
-      rev.confirm_status === '草稿' ? btn('送待確認', () => guard(() => s.run((dd, k) => RC.submitRevision(dd, k, rev.id)))) : null,
-      btn('撤銷此版本', () => guard(async () => {
-        const v = await formDialog('撤銷版本', [{ key: 'reason', label: '撤銷原因', type: 'textarea', required: true }]);
-        if (v) await s.run((dd, k) => RC.withdrawRevision(dd, k, rev.id, v.reason));
-      }))));
-  }
-  if (editing && rev.confirm_status === '已確認') {
-    box.appendChild(h('div', { class: 'toolbar' }, btn('建立更正版本', () => guard(() => newRevision(env, rec, rev)))));
-  }
-  out.push(box);
-  const imp = M.activeImport(d);
-  if (editing && draft && st.editRule && rev.category !== '取消認定') {
-    const eb = h('section', { class: 'panel' }, h('h2', { text: '編輯適用條件' }));
-    if (!imp) eb.appendChild(h('p', { class: 'warn-text', text: '尚無已啟用主檔，無法點選條件。' }));
-    else if (!st.rows || st.rowsFor !== imp.id) eb.appendChild(btn('載入主檔選項', () => guard(async () => { st.rows = await masterRows(s, imp); st.rowsFor = imp.id; })));
-    else {
-      eb.appendChild(ruleEditor(env, st.ruleHolder, { rows: st.rows, imp }));
-      eb.appendChild(h('div', { class: 'toolbar' }, btn('套用條件至此版本', () => guard(async () => {
-        R.validateRule(st.ruleHolder.rule);
-        await s.run((dd, k) => RC.updateRevision(dd, k, rev.id, { rule: deepClone(st.ruleHolder.rule) }, { expectedVersion: rev.row_version }));
-        st.editRule = false; st.preview = null;
-      }), { primary: true })));
-    }
-    out.push(eb);
-  }
-  if (rev.rule && rev.category !== '取消認定') out.push(...snapshotSection(env, rev, imp));
-  if (rev.rule && rev.category !== '取消認定') out.push(groupSection(env, rev));
-  if (editing && draft) {
-    out.push(h('section', { class: 'panel' }, h('h3', { text: '確認認定版本' }),
-      h('p', { class: 'note', text: '確認前須有與目前條件一致之已確認快照；類別與其他認定衝突時須指定處理依據。系統內確認不取代公文核定。' }),
-      btn('確認此認定版本', () => guard(() => confirmRevisionUI(env, rev)), { primary: true })));
-  }
-  return out;
-}
-
-async function confirmRevisionUI(env, rev) {
-  const d = data(env);
-  const opId = newId();
-  let basis = null;
-  const conflicts = RC.categoryConflicts(d, rev.id);
-  const scope = rev.rule ? RC.revisionScope(d, rev.id).size : 0;
-  const body = [h('p', { text: `第 ${rev.revision_no} 版：${rev.category}，期間 ${period(rev.effective_from, rev.effective_to)}，範圍 ${scope} 品項，完整性 ${rev.completeness}。` })];
-  if (conflicts.length) {
-    body.push(h('p', { class: 'warn-text', text: `與其他認定類別衝突 ${conflicts.length} 筆：` + conflicts.slice(0, 10).map((c) => `${c.drug_code}（${c.other_name}：${c.other_category}）`).join('；') }));
-    const inp = h('textarea', { rows: 2, cols: 40 });
-    body.push(h('label', null, '處理依據＊ ', inp));
-    const ok = await dialog('確認認定版本', body, [{ label: '取消', value: null }, { label: '確認', value: true, primary: true, validate: () => !!inp.value.trim() }]);
-    if (!ok) return;
-    basis = inp.value.trim();
-  } else {
-    const ok = await dialog('確認認定版本', body, [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
-    if (!ok) return;
-  }
-  await env.s.run((dd, k) => { RC.confirmRevision(dd, k, rev.id, { conflictBasis: basis }); return { id: rev.id }; }, { opId, kind: '確認認定版本' });
-}
-
-function snapshotSection(env, rev, imp) {
-  const { s, ui, btn, guard } = env;
-  const st = ui.recog;
-  const d = data(env);
-  const editing = s.mode === 'edit';
-  const snaps = list(d, 'scope_snapshot').filter((x) => x.revision_id === rev.id).sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  const out = [];
-  const box = h('section', { class: 'panel' }, h('h2', { text: '範圍快照（認定範圍名單之證據）' }),
-    h('p', { class: 'note', text: '快照為當時判斷之證據，不因新主檔重算覆寫。新主檔之新符合品項經確認後形成新快照。' }),
-    table(['建立', '主檔基準日', '符合', '待確認', '全域排除', '狀態', '規則一致', '確認', ''], snaps.map((x) => {
-      const mi = find(d, 'master_import', x.import_id) || {};
-      return [x.created_at, mi.base_date || '', String(x.match_count), String(x.pending_count),
-        x.excluded ? Object.entries(x.excluded).map(([k, v]) => `${k} ${v}`).join('；') : '', x.status,
-        R.canonical(x.rule) === R.canonical(rev.rule) ? '是' : '否（規則已變更）', x.confirmed_by ? `${x.confirmed_by}，${x.confirmed_at}` : '',
-        btn(st.snap === x.id ? '已開啟' : '開啟', () => { st.snap = x.id; st.memberPage = 0; env.render(); }, { disabled: st.snap === x.id })];
-    })));
-  if (editing && rev.confirm_status !== '撤銷') {
-    if (!imp) box.appendChild(h('p', { class: 'warn-text', text: '尚無已啟用主檔，無法建立快照。' }));
-    else {
-      box.appendChild(h('div', { class: 'toolbar' }, btn(`以目前主檔（${imp.base_date}）預覽`, () => guard(async () => {
-        const rows = await masterRows(s, imp);
-        st.preview = await R.previewRule(deepClone(rev.rule), rows, imp, { threshold: s.settings.large_scope_threshold, exclusions: R.exclusionOf(s.settings) });
-        st.previewFor = { rev: rev.id, rule: R.canonical(rev.rule), imp: imp.id };
-        st.pvState = {};
-      }), { primary: true })));
-    }
-  }
-  out.push(box);
-  if (st.preview && st.previewFor && st.previewFor.rev === rev.id && st.previewFor.rule === R.canonical(rev.rule)) {
-    const pp = previewPanel(env, st.preview, st.pvState);
-    if (editing) pp.appendChild(h('div', { class: 'toolbar' }, btn('保存為快照（預覽狀態）', () => guard(async () => {
-      const pv = st.preview;
-      const snap = await s.run((dd, k) => RC.saveSnapshot(dd, k, rev.id, find(dd, 'master_import', pv.import_id), pv));
-      st.preview = null; st.snap = snap.id; st.memberPage = 0;
-    }), { primary: true })));
-    out.push(pp);
-  }
-  const snap = st.snap ? find(d, 'scope_snapshot', st.snap) : null;
-  if (snap && snap.revision_id === rev.id) out.push(memberPanel(env, rev, snap));
-  return out;
-}
-
-function memberPanel(env, rev, snap) {
-  const { s, ui, btn, guard } = env;
-  const st = ui.recog;
-  const d = data(env);
-  const editable = s.mode === 'edit' && snap.status === '預覽';
-  const members = RC.snapshotMemberList(d, snap.id).sort((a, b) => (a.drug_code < b.drug_code ? -1 : 1));
-  const reasons = RC.pendingReasonCounts(members);
-  const undecided = members.filter((m) => m.eval_result === '待確認' && !m.manual_result).length;
-  const final = RC.snapshotFinal(d, snap.id).length;
-  st.memberFilter = st.memberFilter || '';
-  const rows = members.filter((m) => !st.memberFilter || (st.memberFilter === '未確認' ? m.eval_result === '待確認' && !m.manual_result : m.eval_result === st.memberFilter));
-  const page = st.memberPage || 0;
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
-  const fsel = h('select', { 'aria-label': '名單篩選' }, [['', '全部'], ['符合', '符合'], ['待確認', '待確認'], ['未確認', '待確認且未人工確認']].map(([k, x]) => h('option', { value: k, text: x, selected: k === st.memberFilter })));
-  fsel.addEventListener('change', () => { st.memberFilter = fsel.value; st.memberPage = 0; env.render(); });
-  const box = h('section', { class: 'panel' }, h('h2', { text: `快照名單（${snap.status}）` }),
-    h('p', { text: `名單 ${members.length} 筆；最終範圍 ${final} 筆；待確認未人工確認 ${undecided} 筆。` }),
-    Object.keys(reasons).length ? table(['待確認原因', '筆數', ''], Object.entries(reasons).map(([k, v]) => [k, String(v), editable ? h('span', null,
-      btn('全部納入', () => guard(() => bulkUI(env, snap, k, '納入', v))), ' ', btn('全部排除', () => guard(() => bulkUI(env, snap, k, '排除', v)))) : ''])) : null,
-    h('div', { class: 'filters' }, h('label', null, '篩選 ', fsel), h('span', { text: `共 ${rows.length} 筆` }),
-      btn('上一頁', () => { st.memberPage = page - 1; env.render(); }, { disabled: page === 0 }), h('span', { text: `第 ${page + 1}／${pages} 頁` }),
-      btn('下一頁', () => { st.memberPage = page + 1; env.render(); }, { disabled: page >= pages - 1 })),
-    table(['藥品代碼', '分組', '判定', '判定路徑', '人工確認', '理由', ''], rows.slice(page * PAGE, (page + 1) * PAGE).map((m) => [m.drug_code, m.group_code || '', m.eval_result, m.path,
-      m.manual_result || '', m.manual_reason || '', editable && m.eval_result === '待確認' ? h('span', null,
-        btn('納入', () => guard(() => memberUI(env, snap, m, '納入'))), ' ', btn('排除', () => guard(() => memberUI(env, snap, m, '排除')))) : ''])));
-  if (editable) {
-    box.appendChild(h('div', { class: 'toolbar' },
-      btn('確認此快照名單', () => guard(() => confirmSnapshotUI(env, rev, snap)), { primary: true, disabled: undecided > 0, title: undecided ? '尚有待確認品項未人工確認' : '' }),
-      btn('撤銷此快照', () => guard(async () => {
-        const v = await formDialog('撤銷快照', [{ key: 'reason', label: '原因', type: 'textarea', required: true }]);
-        if (v) await s.run((dd, k) => RC.revokeSnapshot(dd, k, snap.id, v.reason));
-      }))));
-  }
-  if (snap.added_codes && snap.added_codes.length) box.appendChild(h('p', { class: 'note', text: '本快照擴增已確認認定範圍之品項：' + snap.added_codes.join('、') }));
-  return box;
-}
-
-async function memberUI(env, snap, m, decision) {
-  const v = await formDialog(`人工確認：${m.drug_code} ${decision}`, [{ key: 'reason', label: '理由', type: 'textarea', required: true }, { type: 'note', label: `判定路徑：${m.path}` }]);
-  if (v) await env.s.run((dd, k) => RC.setMemberDecision(dd, k, snap.id, m.drug_code, decision, v.reason));
-}
-
-async function bulkUI(env, snap, key, decision, n) {
-  const v = await formDialog(`依原因批次${decision}`, [{ type: 'note', label: `待確認原因「${key}」之 ${n} 筆品項將全部人工確認為「${decision}」。` }, { key: 'reason', label: '理由', type: 'textarea', required: true }]);
-  if (v) await env.s.run((dd, k) => RC.bulkMemberDecision(dd, k, snap.id, key, decision, v.reason));
-}
-
-async function confirmSnapshotUI(env, rev, snap) {
-  const d = data(env);
-  const opId = newId();
-  const added = RC.snapshotAddedCodes(d, snap.id);
-  const body = [h('p', { text: `確認後名單不可修改。最終範圍 ${RC.snapshotFinal(d, snap.id).length} 筆。` })];
-  if (rev.confirm_status === '已確認') {
-    body.push(h('p', { class: 'warn-text', text: `此認定版本已確認；本快照將擴增範圍 ${added.length} 項：` }));
-    body.push(h('p', { text: added.join('、') || '（無新增）' }));
-    body.push(h('p', { class: 'note', text: '新增品項僅擴增認定範圍名單，不自動調高或註記（T13）。' }));
-  }
-  const ok = await dialog('確認快照名單', body, [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
-  if (!ok) return;
-  await env.s.run((dd, k) => { RC.confirmSnapshot(dd, k, snap.id, { acknowledgedAdded: added }); return { id: snap.id }; }, { opId, kind: '確認快照' });
-}
-
-function groupSection(env, rev) {
-  const { s, btn, guard } = env;
-  const d = data(env);
-  const editing = s.mode === 'edit';
-  const gts = list(d, 'group_treatment').filter((g) => g.revision_id === rev.id);
-  const snap = RC.confirmedSnapshotOf(d, rev.id);
-  const groups = snap && snap.groups ? Object.entries(snap.groups) : [];
-  return h('section', { class: 'panel' }, h('h2', { text: '分組調價方式' }),
-    h('p', { class: 'note', text: 'B02：有品項建議提高通過後，相關分組不再依DET調整，改依第25條；適用起日待確認（Q01），不由會議日推定。部分涵蓋分組不自動推導整組（Q02）。' }),
-    groups.length ? table(['分組', '範圍內', '分組總數', '涵蓋'], groups.map(([g, x]) => [g, String(x.inside), String(x.total), x.inside < x.total ? '部分涵蓋' : '全組'])) : h('p', { class: 'note', text: '尚無已確認快照。' }),
-    gts.length ? table(['分組', '調價方式', '部分涵蓋', '期間', '依據', '狀態', ''], gts.map((g) => [g.group_code, g.method, g.partial_cover ? '是' : '否', period(g.effective_from, g.effective_to), g.basis || '', g.confirm_status,
-      editing && (g.confirm_status === '草稿' || g.confirm_status === '待確認') ? btn('確認', () => guard(async () => {
-        const ok = await dialog('確認分組調價方式', [h('p', { text: `${g.group_code}：${g.method}，期間 ${period(g.effective_from, g.effective_to)}` })], [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
-        if (ok) await s.run((dd, k) => RC.confirmGroupTreatment(dd, k, g.id), { opId: newId(), kind: '確認分組調價方式' });
-      })) : ''])) : null,
-    editing && groups.length ? btn('登錄分組調價方式', () => guard(async () => {
-      const v = await formDialog('登錄分組調價方式', [
-        { key: 'group_code', label: '分組', type: 'select', options: groups.map(([g, x]) => [g, `${g}（${x.inside}/${x.total}）`]), required: true },
-        { key: 'method', label: '調價方式', type: 'select', options: opts(E.METHOD), value: '待確認', required: true },
-        { key: 'effective_from', label: '適用起日', type: 'date' }, { key: 'effective_to', label: '迄日（不含）', type: 'date' },
-        { key: 'basis', label: '依據', type: 'textarea' }]);
-      if (v) await s.run((dd, k) => RC.setGroupTreatment(dd, k, { ...v, revision_id: rev.id }));
-    })) : null);
-}
-
-
-return { recognitionTab };
 })();
 
 // ---- core/pricing.js ----
@@ -6811,6 +6688,448 @@ function attachmentsOf(data, entity, entityId) {
 return { CONTRACT_EDIT, createContract, addContractDrug, contractAffected, updateContract, contractDrugs, contractChain, contractAlerts, contractExpiryText, listContracts, PA_EDIT, createPriceAction, createPriceActions, updatePriceAction, submitPriceAction, withdrawPriceAction, contractCovers, validatePriceAction, ANNOT_EDIT, createAnnotation, updateAnnotation, submitAnnotation, withdrawAnnotation, validateAnnotation, confirmAnnouncement, priceHistory, annotationOn, annotationHistory, scopeCandidates, listPriceActions, listAnnotations, confirmAnnouncementWithFiles, attachFiles, attachmentsOf };
 })();
 
+// ---- core/query.js ----
+const __m_core_query_js = (function () {
+// 品項明細查詢（T21）：依藥品代碼回溯認定、案件與會議、公告調高、合約、註記、快照、差異待辦。純讀取。
+const { list, find } = __m_core_model_js;
+const { drugRecognitions, drugCategoryOn, listRecognitions, revisionHistory, revisionScope } = __m_core_recognition_js;
+const { priceHistory, annotationOn, annotationHistory, contractDrugs } = __m_core_pricing_js;
+const { caseTimeline } = __m_core_cases_js;
+function drugDetail(data, drugCode, day, { masterRow } = {}) {
+  const code = String(drugCode || '').trim();
+  const cases = list(data, 'case_drug').filter((d) => d.drug_code === code).map((cd) => {
+    const c = find(data, 'case_record', cd.case_id) || {};
+    const results = [];
+    for (const a of caseTimeline(data, cd.case_id)) {
+      for (const dec of a.decisions) {
+        for (const r of dec.drugs) if (r.drug_code === code) results.push({ meeting_date: a.meeting_date, meeting_name: a.meeting_name, nature: dec.nature, result: r.result, conditions: r.conditions || null, superseded: !!dec.superseded });
+      }
+    }
+    return { case_id: c.id, case_no: c.case_no, subject: c.subject, status: c.status, summary: c.result_summary, results };
+  });
+  const snapshots = list(data, 'scope_member').filter((m) => m.drug_code === code).map((m) => {
+    const s = find(data, 'scope_snapshot', m.snapshot_id) || {};
+    const rev = find(data, 'recognition_revision', s.revision_id) || {};
+    const rec = find(data, 'recognition', rev.recognition_id) || {};
+    const imp = find(data, 'master_import', s.import_id) || {};
+    return { snapshot_id: s.id, status: s.status, recognition: rec.name, revision_no: rev.revision_no, base_date: imp.base_date, eval_result: m.eval_result, manual_result: m.manual_result, group_code: m.group_code };
+  });
+  const contracts = list(data, 'contract').filter((c) => contractDrugs(data, c.id).some((d) => d.drug_code === code))
+    .map((c) => ({ ...c, item: contractDrugs(data, c.id).find((d) => d.drug_code === code) }));
+  const prices = priceHistory(data, code).map((p) => {
+    const rev = find(data, 'recognition_revision', p.revision_id) || {};
+    const rec = find(data, 'recognition', rev.recognition_id) || {};
+    return { ...p, recognition: rec.name, revision_no: rev.revision_no };
+  });
+  return {
+    drug_code: code,
+    master: masterRow || null,
+    category: drugCategoryOn(data, code, day),
+    recognitions: drugRecognitions(data, code, day),
+    cases,
+    snapshots,
+    prices,
+    contracts,
+    annotation: annotationOn(data, code, day),
+    annotations: annotationHistory(data, code),
+    todos: list(data, 'review_item').filter((t) => t.drug_code === code),
+  };
+}
+
+// 以藥品代碼或片段查詢系統中出現過之代碼（認定範圍、案件、調高、合約、註記）
+function knownCodes(data) {
+  const s = new Set();
+  for (const c of ['case_drug', 'scope_member', 'price_action', 'contract_drug', 'annotation_event', 'review_item']) for (const r of list(data, c)) if (r.drug_code) s.add(r.drug_code);
+  return s;
+}
+
+// 認定清單匯出列：每個版本一列，並列出涵蓋品項數
+function recognitionExportRows(data, day) {
+  const headers = ['認定編號', '認定名稱', `狀態（${day}）`, '版本', '類別', '起日（含）', '迄日（不含）', '版本狀態', '確認狀態', '涵蓋品項數', '涵蓋品項'];
+  const rows = [];
+  for (const r of listRecognitions(data, { day })) {
+    for (const h of revisionHistory(data, r.id, day)) {
+      const codes = h.confirm_status === '已確認' ? [...revisionScope(data, h.id)].sort() : [];
+      rows.push([r.recognition_no, r.name, r.state, String(h.revision_no), h.category, h.effective_from ? { date: h.effective_from } : '', h.effective_to ? { date: h.effective_to } : '', h.state, h.confirm_status, { n: String(codes.length) }, codes.join(' ')]);
+    }
+  }
+  return { headers, rows };
+}
+
+return { drugDetail, knownCodes, recognitionExportRows };
+})();
+
+// ---- ui/recognitionView.js ----
+const __m_ui_recognitionView_js = (function () {
+// 認定清單、認定詳情（版本、適用條件、快照與人工確認、確認、分組調價方式、歷程）（第9.2、10節）。
+const { h, table, dialog } = __m_ui_dom_js;
+const { formDialog, opts } = __m_ui_forms_js;
+const RC = __m_core_recognition_js;
+const R = __m_core_rules_js;
+const M = __m_core_masterImport_js;
+const { E, find, list } = __m_core_model_js;
+const { taipeiToday } = __m_core_values_js;
+const { newId, deepClone } = __m_core_util_js;
+const { ruleEditor, previewPanel } = __m_ui_ruleView_js;
+const { masterRows } = __m_ui_masterView_js;
+const { exportTable } = __m_ui_exportUI_js;
+const { recognitionExportRows } = __m_core_query_js;
+const PAGE = 100;
+
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+function today() {
+  return taipeiToday(Date.now());
+}
+
+function period(a, b) {
+  return `${a || '（起日未知）'} ～ ${b || ''}`;
+}
+
+function recognitionTab(env) {
+  env.ui.recog = env.ui.recog || { keyword: null, day: today(), selected: null, rev: null };
+  return env.ui.recog.selected ? detail(env) : listView(env);
+}
+
+function listView(env) {
+  const { s, ui, btn, guard, render } = env;
+  const st = ui.recog;
+  const d = data(env);
+  const kw = h('input', { type: 'text', size: 18, value: st.keyword || '', placeholder: '名稱、編號、藥品代碼、分組', 'aria-label': '認定關鍵字' });
+  const day = h('input', { type: 'text', size: 12, value: st.day, 'aria-label': '查詢日期' });
+  const rows = RC.listRecognitions(d, { keyword: st.keyword, day: st.day });
+  const t = table(['編號', '名稱', '類別', `狀態（${st.day}）`, '涵蓋品項數', '草稿／待確認版本', '最後更新'], []);
+  for (const r of rows) {
+    t.querySelector('tbody').appendChild(h('tr', { class: 'clickable', tabindex: '0', on: { click: () => { st.selected = r.id; st.rev = null; render(); } } },
+      [r.recognition_no, r.name, r.category || '', r.state, String(r.drug_count), String(r.pending_revisions), r.last_updated].map((x) => h('td', { text: x }))));
+  }
+  return h('section', { class: 'panel' }, h('h2', { text: '認定清單' }),
+    h('div', { class: 'filters' }, h('label', null, '關鍵字 ', kw), h('label', null, '查詢日期 ', day),
+      btn('查詢', () => { st.keyword = kw.value.trim() || null; st.day = day.value.trim() || today(); render(); })),
+    h('div', { class: 'toolbar' }, s.mode === 'edit' ? btn('新增認定項目', () => guard(() => newRecognition(env)), { primary: true }) : null,
+      btn('匯出認定清單', () => guard(() => { const ex = recognitionExportRows(d, st.day); return exportTable(s, { kind: '認定清單', condition: '全部認定項目（每版本一列）', day: st.day, headers: ex.headers, rows: ex.rows }); }))),
+    h('p', { class: 'note', text: `共 ${rows.length} 項。有效狀態依查詢日期計算；未到生效日之已確認版本顯示待生效。` }), t);
+}
+
+async function newRecognition(env) {
+  const v = await formDialog('新增認定項目', [
+    { key: 'name', label: '認定名稱', required: true }, { key: 'unit', label: '管理單位', type: 'select', options: [['', '（未填）'], ['核價', '核價'], ['調價', '調價']] },
+    { key: 'description', label: '說明', type: 'textarea' },
+    { type: 'note', label: '建立前請先搜尋既有認定項目；同一認定之變更請建立新版本，避免重複認定。' }]);
+  if (!v) return;
+  const r = await env.s.run((d, k) => RC.createRecognition(d, k, { ...v, unit: v.unit || null }));
+  env.ui.recog.selected = r.id;
+}
+
+function revisionFields(rev = {}, d, caseOptions) {
+  return [
+    { key: 'category', label: '認定類別', type: 'select', options: opts(E.REV_CATEGORY), value: rev.category || '特殊藥品', required: true },
+    { key: 'scope_text', label: '適用範圍原文', type: 'textarea', value: rev.scope_text },
+    { key: 'conditions_text', label: '附帶條件', type: 'textarea', value: rev.conditions_text },
+    { key: 'effective_from', label: '生效日（起日含）', type: 'date', value: rev.effective_from, hint: '未知請留空，不以會議日補填' },
+    { key: 'effective_to', label: '迄日（不含）', type: 'date', value: rev.effective_to, hint: '空白代表無已知終止日，不代表永久有效' },
+    { key: 'case_id', label: '相關案件', type: 'select', options: [['', '（無）'], ...caseOptions], value: rev.case_id || '' },
+  ];
+}
+
+function caseOptions(d) {
+  return list(d, 'case_record').map((c) => [c.id, `${c.case_no} ${c.subject}`]);
+}
+
+function decisionOptions(d) {
+  return list(d, 'decision').map((x) => {
+    const a = find(d, 'meeting_agenda', x.agenda_id) || {};
+    const m = find(d, 'meeting', a.meeting_id) || {};
+    const c = find(d, 'case_record', a.case_id) || {};
+    return [x.id, `${c.case_no || ''}｜${m.meeting_date || '日期未知'} ${m.name || ''}｜${x.nature}：${x.result}`];
+  });
+}
+
+async function newRevision(env, rec, base) {
+  const d = data(env);
+  const fields = revisionFields(base ? { ...base, effective_from: null, effective_to: null } : {}, d, caseOptions(d));
+  fields.push({ key: 'decision_ids', label: '依據決議', type: 'checks', options: decisionOptions(d), value: [] });
+  if (base) fields.unshift({ key: 'correction_reason', label: '更正原因', required: true });
+  const v = await formDialog(base ? `更正版本（取代第${base.revision_no}版，原版本保留）` : '新增認定版本', fields, {
+    intro: base ? '適用條件沿用原版本，可於建立後修改；確認前須重新建立並確認快照。' : '建立後再設定適用條件（規則）並預覽建立快照。',
+  });
+  if (!v) return;
+  const rev = await env.s.run((dd, k) => RC.createRevision(dd, k, rec.id, {
+    ...v, case_id: v.case_id || null, rule: base ? deepClone(base.rule) : null, original_category: base ? base.original_category : null,
+    supersedes_id: base ? base.id : null,
+  }));
+  env.ui.recog.rev = rev.id;
+}
+
+async function cancelRevision(env, rec) {
+  const d = data(env);
+  const v = await formDialog('建立取消認定版本', [
+    { key: 'effective_from', label: '取消生效日', type: 'date', hint: '未知請留空並標示不完整' },
+    { key: 'decision_ids', label: '依據決議', type: 'checks', options: decisionOptions(d), value: [] },
+    { key: 'scope_text', label: '取消依據原文', type: 'textarea' },
+    { type: 'note', label: '取消認定須另有依據（B15、Q07）；不自動取消品項註記或調價路徑，相關事件另行登錄。' }]);
+  if (!v) return;
+  const rev = await env.s.run((dd, k) => RC.createRevision(dd, k, rec.id, { ...v, category: '取消認定' }));
+  env.ui.recog.rev = rev.id;
+}
+
+function detail(env) {
+  const { s, ui, btn, guard, render } = env;
+  const st = ui.recog;
+  const d = data(env);
+  const rec = find(d, 'recognition', st.selected);
+  if (!rec) { st.selected = null; return listView(env); }
+  const editing = s.mode === 'edit';
+  const hist = RC.revisionHistory(d, rec.id, st.day);
+  const status = RC.statusOn(d, rec.id, st.day);
+  const parts = [];
+  parts.push(h('section', { class: 'panel' },
+    h('div', { class: 'toolbar' }, btn('← 回認定清單', () => { st.selected = null; render(); })),
+    h('h2', { text: `${rec.recognition_no}｜${rec.name}` }),
+    h('p', { text: `${st.day} 狀態：${status.state}${status.revision ? `（第${status.revision.revision_no}版，${status.revision.category}）` : ''}` }),
+    rec.description ? h('p', { class: 'note', text: rec.description }) : null,
+    h('h3', { text: '版本與歷程' }),
+    table(['版', '類別', '期間（起含迄不含）', `狀態（${st.day}）`, '完整性', '範圍品項', '快照', ''], hist.map((r) => {
+      const snaps = list(d, 'scope_snapshot').filter((x) => x.revision_id === r.id);
+      return [String(r.revision_no) + (r.supersedes_id ? '（更正）' : ''), r.category, period(r.effective_from, r.period_end), r.state, r.completeness,
+        String(r.rule ? RC.revisionScope(d, r.id).size : 0), `${snaps.filter((x) => x.status === '已確認').length}/${snaps.length}`,
+        btn(st.rev === r.id ? '已開啟' : '開啟', () => { st.rev = r.id; st.preview = null; render(); }, { disabled: st.rev === r.id })];
+    })),
+    editing ? h('div', { class: 'toolbar' },
+      btn('新增版本', () => guard(() => newRevision(env, rec)), { primary: !hist.length }),
+      btn('建立取消認定版本', () => guard(() => cancelRevision(env, rec)), { disabled: !hist.some((x) => x.confirm_status === '已確認') })) : null));
+  const rev = st.rev ? find(d, 'recognition_revision', st.rev) : null;
+  if (rev) parts.push(...revisionPanel(env, rec, rev));
+  return parts;
+}
+
+function revisionPanel(env, rec, rev) {
+  const { s, ui, btn, guard } = env;
+  const st = ui.recog;
+  const d = data(env);
+  const editing = s.mode === 'edit';
+  const draft = rev.confirm_status === '草稿' || rev.confirm_status === '待確認';
+  const decs = list(d, 'revision_decision').filter((x) => x.revision_id === rev.id).map((x) => find(d, 'decision', x.decision_id)).filter(Boolean);
+  const decLabel = new Map(decisionOptions(d));
+  const caseRec = rev.case_id ? find(d, 'case_record', rev.case_id) : null;
+  const out = [];
+  const box = h('section', { class: 'panel' }, h('h2', { text: `第 ${rev.revision_no} 版（${rev.confirm_status}）` }),
+    table(['項目', '內容'], [
+      ['類別', rev.category + (rev.original_category ? `（原始：${rev.original_category}）` : '')],
+      ['期間', period(rev.effective_from, rev.effective_to)], ['完整性', rev.completeness],
+      ['適用範圍原文', rev.scope_text || ''], ['附帶條件', rev.conditions_text || ''],
+      ['相關案件', caseRec ? `${caseRec.case_no} ${caseRec.subject}` : ''],
+      ['依據決議', decs.map((x) => decLabel.get(x.id)).join('；')],
+      ['更正', rev.supersedes_id ? `取代版本 ${(find(d, 'recognition_revision', rev.supersedes_id) || {}).revision_no}；原因：${rev.correction_reason}` : ''],
+      ['確認', rev.confirmed_by ? `${rev.confirmed_by}，${rev.confirmed_at}` : ''], ['撤銷原因', rev.revoke_reason || ''],
+    ]),
+    h('h3', { text: '適用條件' }),
+    rev.rule ? h('pre', { class: 'rule-text', text: R.describe(rev.rule) }) : h('p', { class: 'note', text: rev.category === '取消認定' ? '取消認定版本不需適用條件。' : '尚未設定適用條件。' }));
+  if (editing && draft) {
+    box.appendChild(h('div', { class: 'toolbar' },
+      btn('修改版本資料', () => guard(async () => {
+        const v = await formDialog('修改認定版本', [...revisionFields(rev, d, caseOptions(d)), { key: 'reason', label: '修改原因' }]);
+        if (!v) return;
+        const { reason, ...ch } = v;
+        ch.case_id = ch.case_id || null;
+        await s.run((dd, k) => RC.updateRevision(dd, k, rev.id, ch, { expectedVersion: rev.row_version, reason }));
+      })),
+      btn('連結依據決議', () => guard(async () => {
+        const v = await formDialog('連結依據決議', [{ key: 'id', label: '決議', type: 'select', options: decisionOptions(d), required: true }]);
+        if (v) await s.run((dd, k) => RC.addRevisionDecision(dd, k, rev.id, v.id));
+      })),
+      rev.category !== '取消認定' ? btn(st.editRule ? '關閉條件編輯' : '編輯適用條件', () => { st.editRule = !st.editRule; st.ruleHolder = { rule: deepClone(rev.rule) }; env.render(); }) : null,
+      rev.confirm_status === '草稿' ? btn('送待確認', () => guard(() => s.run((dd, k) => RC.submitRevision(dd, k, rev.id)))) : null,
+      btn('撤銷此版本', () => guard(async () => {
+        const v = await formDialog('撤銷版本', [{ key: 'reason', label: '撤銷原因', type: 'textarea', required: true }]);
+        if (v) await s.run((dd, k) => RC.withdrawRevision(dd, k, rev.id, v.reason));
+      }))));
+  }
+  if (editing && rev.confirm_status === '已確認') {
+    box.appendChild(h('div', { class: 'toolbar' }, btn('建立更正版本', () => guard(() => newRevision(env, rec, rev)))));
+  }
+  out.push(box);
+  const imp = M.activeImport(d);
+  if (editing && draft && st.editRule && rev.category !== '取消認定') {
+    const eb = h('section', { class: 'panel' }, h('h2', { text: '編輯適用條件' }));
+    if (!imp) eb.appendChild(h('p', { class: 'warn-text', text: '尚無已啟用主檔，無法點選條件。' }));
+    else if (!st.rows || st.rowsFor !== imp.id) eb.appendChild(btn('載入主檔選項', () => guard(async () => { st.rows = await masterRows(s, imp); st.rowsFor = imp.id; })));
+    else {
+      eb.appendChild(ruleEditor(env, st.ruleHolder, { rows: st.rows, imp }));
+      eb.appendChild(h('div', { class: 'toolbar' }, btn('套用條件至此版本', () => guard(async () => {
+        R.validateRule(st.ruleHolder.rule);
+        await s.run((dd, k) => RC.updateRevision(dd, k, rev.id, { rule: deepClone(st.ruleHolder.rule) }, { expectedVersion: rev.row_version }));
+        st.editRule = false; st.preview = null;
+      }), { primary: true })));
+    }
+    out.push(eb);
+  }
+  if (rev.rule && rev.category !== '取消認定') out.push(...snapshotSection(env, rev, imp));
+  if (rev.rule && rev.category !== '取消認定') out.push(groupSection(env, rev));
+  if (editing && draft) {
+    out.push(h('section', { class: 'panel' }, h('h3', { text: '確認認定版本' }),
+      h('p', { class: 'note', text: '確認前須有與目前條件一致之已確認快照；類別與其他認定衝突時須指定處理依據。系統內確認不取代公文核定。' }),
+      btn('確認此認定版本', () => guard(() => confirmRevisionUI(env, rev)), { primary: true })));
+  }
+  return out;
+}
+
+async function confirmRevisionUI(env, rev) {
+  const d = data(env);
+  const opId = newId();
+  let basis = null;
+  const conflicts = RC.categoryConflicts(d, rev.id);
+  const scope = rev.rule ? RC.revisionScope(d, rev.id).size : 0;
+  const body = [h('p', { text: `第 ${rev.revision_no} 版：${rev.category}，期間 ${period(rev.effective_from, rev.effective_to)}，範圍 ${scope} 品項，完整性 ${rev.completeness}。` })];
+  if (conflicts.length) {
+    body.push(h('p', { class: 'warn-text', text: `與其他認定類別衝突 ${conflicts.length} 筆：` + conflicts.slice(0, 10).map((c) => `${c.drug_code}（${c.other_name}：${c.other_category}）`).join('；') }));
+    const inp = h('textarea', { rows: 2, cols: 40 });
+    body.push(h('label', null, '處理依據＊ ', inp));
+    const ok = await dialog('確認認定版本', body, [{ label: '取消', value: null }, { label: '確認', value: true, primary: true, validate: () => !!inp.value.trim() }]);
+    if (!ok) return;
+    basis = inp.value.trim();
+  } else {
+    const ok = await dialog('確認認定版本', body, [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
+    if (!ok) return;
+  }
+  await env.s.run((dd, k) => { RC.confirmRevision(dd, k, rev.id, { conflictBasis: basis }); return { id: rev.id }; }, { opId, kind: '確認認定版本' });
+}
+
+function snapshotSection(env, rev, imp) {
+  const { s, ui, btn, guard } = env;
+  const st = ui.recog;
+  const d = data(env);
+  const editing = s.mode === 'edit';
+  const snaps = list(d, 'scope_snapshot').filter((x) => x.revision_id === rev.id).sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const out = [];
+  const box = h('section', { class: 'panel' }, h('h2', { text: '範圍快照（認定範圍名單之證據）' }),
+    h('p', { class: 'note', text: '快照為當時判斷之證據，不因新主檔重算覆寫。新主檔之新符合品項經確認後形成新快照。' }),
+    table(['建立', '主檔基準日', '符合', '待確認', '全域排除', '狀態', '規則一致', '確認', ''], snaps.map((x) => {
+      const mi = find(d, 'master_import', x.import_id) || {};
+      return [x.created_at, mi.base_date || '', String(x.match_count), String(x.pending_count),
+        x.excluded ? Object.entries(x.excluded).map(([k, v]) => `${k} ${v}`).join('；') : '', x.status,
+        R.canonical(x.rule) === R.canonical(rev.rule) ? '是' : '否（規則已變更）', x.confirmed_by ? `${x.confirmed_by}，${x.confirmed_at}` : '',
+        btn(st.snap === x.id ? '已開啟' : '開啟', () => { st.snap = x.id; st.memberPage = 0; env.render(); }, { disabled: st.snap === x.id })];
+    })));
+  if (editing && rev.confirm_status !== '撤銷') {
+    if (!imp) box.appendChild(h('p', { class: 'warn-text', text: '尚無已啟用主檔，無法建立快照。' }));
+    else {
+      box.appendChild(h('div', { class: 'toolbar' }, btn(`以目前主檔（${imp.base_date}）預覽`, () => guard(async () => {
+        const rows = await masterRows(s, imp);
+        st.preview = await R.previewRule(deepClone(rev.rule), rows, imp, { threshold: s.settings.large_scope_threshold, exclusions: R.exclusionOf(s.settings) });
+        st.previewFor = { rev: rev.id, rule: R.canonical(rev.rule), imp: imp.id };
+        st.pvState = {};
+      }), { primary: true })));
+    }
+  }
+  out.push(box);
+  if (st.preview && st.previewFor && st.previewFor.rev === rev.id && st.previewFor.rule === R.canonical(rev.rule)) {
+    const pp = previewPanel(env, st.preview, st.pvState);
+    if (editing) pp.appendChild(h('div', { class: 'toolbar' }, btn('保存為快照（預覽狀態）', () => guard(async () => {
+      const pv = st.preview;
+      const snap = await s.run((dd, k) => RC.saveSnapshot(dd, k, rev.id, find(dd, 'master_import', pv.import_id), pv));
+      st.preview = null; st.snap = snap.id; st.memberPage = 0;
+    }), { primary: true })));
+    out.push(pp);
+  }
+  const snap = st.snap ? find(d, 'scope_snapshot', st.snap) : null;
+  if (snap && snap.revision_id === rev.id) out.push(memberPanel(env, rev, snap));
+  return out;
+}
+
+function memberPanel(env, rev, snap) {
+  const { s, ui, btn, guard } = env;
+  const st = ui.recog;
+  const d = data(env);
+  const editable = s.mode === 'edit' && snap.status === '預覽';
+  const members = RC.snapshotMemberList(d, snap.id).sort((a, b) => (a.drug_code < b.drug_code ? -1 : 1));
+  const reasons = RC.pendingReasonCounts(members);
+  const undecided = members.filter((m) => m.eval_result === '待確認' && !m.manual_result).length;
+  const final = RC.snapshotFinal(d, snap.id).length;
+  st.memberFilter = st.memberFilter || '';
+  const rows = members.filter((m) => !st.memberFilter || (st.memberFilter === '未確認' ? m.eval_result === '待確認' && !m.manual_result : m.eval_result === st.memberFilter));
+  const page = st.memberPage || 0;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const fsel = h('select', { 'aria-label': '名單篩選' }, [['', '全部'], ['符合', '符合'], ['待確認', '待確認'], ['未確認', '待確認且未人工確認']].map(([k, x]) => h('option', { value: k, text: x, selected: k === st.memberFilter })));
+  fsel.addEventListener('change', () => { st.memberFilter = fsel.value; st.memberPage = 0; env.render(); });
+  const box = h('section', { class: 'panel' }, h('h2', { text: `快照名單（${snap.status}）` }),
+    h('p', { text: `名單 ${members.length} 筆；最終範圍 ${final} 筆；待確認未人工確認 ${undecided} 筆。` }),
+    Object.keys(reasons).length ? table(['待確認原因', '筆數', ''], Object.entries(reasons).map(([k, v]) => [k, String(v), editable ? h('span', null,
+      btn('全部納入', () => guard(() => bulkUI(env, snap, k, '納入', v))), ' ', btn('全部排除', () => guard(() => bulkUI(env, snap, k, '排除', v)))) : ''])) : null,
+    h('div', { class: 'filters' }, h('label', null, '篩選 ', fsel), h('span', { text: `共 ${rows.length} 筆` }),
+      btn('上一頁', () => { st.memberPage = page - 1; env.render(); }, { disabled: page === 0 }), h('span', { text: `第 ${page + 1}／${pages} 頁` }),
+      btn('下一頁', () => { st.memberPage = page + 1; env.render(); }, { disabled: page >= pages - 1 })),
+    table(['藥品代碼', '分組', '判定', '判定路徑', '人工確認', '理由', ''], rows.slice(page * PAGE, (page + 1) * PAGE).map((m) => [m.drug_code, m.group_code || '', m.eval_result, m.path,
+      m.manual_result || '', m.manual_reason || '', editable && m.eval_result === '待確認' ? h('span', null,
+        btn('納入', () => guard(() => memberUI(env, snap, m, '納入'))), ' ', btn('排除', () => guard(() => memberUI(env, snap, m, '排除')))) : ''])));
+  if (editable) {
+    box.appendChild(h('div', { class: 'toolbar' },
+      btn('確認此快照名單', () => guard(() => confirmSnapshotUI(env, rev, snap)), { primary: true, disabled: undecided > 0, title: undecided ? '尚有待確認品項未人工確認' : '' }),
+      btn('撤銷此快照', () => guard(async () => {
+        const v = await formDialog('撤銷快照', [{ key: 'reason', label: '原因', type: 'textarea', required: true }]);
+        if (v) await s.run((dd, k) => RC.revokeSnapshot(dd, k, snap.id, v.reason));
+      }))));
+  }
+  if (snap.added_codes && snap.added_codes.length) box.appendChild(h('p', { class: 'note', text: '本快照擴增已確認認定範圍之品項：' + snap.added_codes.join('、') }));
+  return box;
+}
+
+async function memberUI(env, snap, m, decision) {
+  const v = await formDialog(`人工確認：${m.drug_code} ${decision}`, [{ key: 'reason', label: '理由', type: 'textarea', required: true }, { type: 'note', label: `判定路徑：${m.path}` }]);
+  if (v) await env.s.run((dd, k) => RC.setMemberDecision(dd, k, snap.id, m.drug_code, decision, v.reason));
+}
+
+async function bulkUI(env, snap, key, decision, n) {
+  const v = await formDialog(`依原因批次${decision}`, [{ type: 'note', label: `待確認原因「${key}」之 ${n} 筆品項將全部人工確認為「${decision}」。` }, { key: 'reason', label: '理由', type: 'textarea', required: true }]);
+  if (v) await env.s.run((dd, k) => RC.bulkMemberDecision(dd, k, snap.id, key, decision, v.reason));
+}
+
+async function confirmSnapshotUI(env, rev, snap) {
+  const d = data(env);
+  const opId = newId();
+  const added = RC.snapshotAddedCodes(d, snap.id);
+  const body = [h('p', { text: `確認後名單不可修改。最終範圍 ${RC.snapshotFinal(d, snap.id).length} 筆。` })];
+  if (rev.confirm_status === '已確認') {
+    body.push(h('p', { class: 'warn-text', text: `此認定版本已確認；本快照將擴增範圍 ${added.length} 項：` }));
+    body.push(h('p', { text: added.join('、') || '（無新增）' }));
+    body.push(h('p', { class: 'note', text: '新增品項僅擴增認定範圍名單，不自動調高或註記（T13）。' }));
+  }
+  const ok = await dialog('確認快照名單', body, [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
+  if (!ok) return;
+  await env.s.run((dd, k) => { RC.confirmSnapshot(dd, k, snap.id, { acknowledgedAdded: added }); return { id: snap.id }; }, { opId, kind: '確認快照' });
+}
+
+function groupSection(env, rev) {
+  const { s, btn, guard } = env;
+  const d = data(env);
+  const editing = s.mode === 'edit';
+  const gts = list(d, 'group_treatment').filter((g) => g.revision_id === rev.id);
+  const snap = RC.confirmedSnapshotOf(d, rev.id);
+  const groups = snap && snap.groups ? Object.entries(snap.groups) : [];
+  return h('section', { class: 'panel' }, h('h2', { text: '分組調價方式' }),
+    h('p', { class: 'note', text: 'B02：有品項建議提高通過後，相關分組不再依DET調整，改依第25條；適用起日待確認（Q01），不由會議日推定。部分涵蓋分組不自動推導整組（Q02）。' }),
+    groups.length ? table(['分組', '範圍內', '分組總數', '涵蓋'], groups.map(([g, x]) => [g, String(x.inside), String(x.total), x.inside < x.total ? '部分涵蓋' : '全組'])) : h('p', { class: 'note', text: '尚無已確認快照。' }),
+    gts.length ? table(['分組', '調價方式', '部分涵蓋', '期間', '依據', '狀態', ''], gts.map((g) => [g.group_code, g.method, g.partial_cover ? '是' : '否', period(g.effective_from, g.effective_to), g.basis || '', g.confirm_status,
+      editing && (g.confirm_status === '草稿' || g.confirm_status === '待確認') ? btn('確認', () => guard(async () => {
+        const ok = await dialog('確認分組調價方式', [h('p', { text: `${g.group_code}：${g.method}，期間 ${period(g.effective_from, g.effective_to)}` })], [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
+        if (ok) await s.run((dd, k) => RC.confirmGroupTreatment(dd, k, g.id), { opId: newId(), kind: '確認分組調價方式' });
+      })) : ''])) : null,
+    editing && groups.length ? btn('登錄分組調價方式', () => guard(async () => {
+      const v = await formDialog('登錄分組調價方式', [
+        { key: 'group_code', label: '分組', type: 'select', options: groups.map(([g, x]) => [g, `${g}（${x.inside}/${x.total}）`]), required: true },
+        { key: 'method', label: '調價方式', type: 'select', options: opts(E.METHOD), value: '待確認', required: true },
+        { key: 'effective_from', label: '適用起日', type: 'date' }, { key: 'effective_to', label: '迄日（不含）', type: 'date' },
+        { key: 'basis', label: '依據', type: 'textarea' }]);
+      if (v) await s.run((dd, k) => RC.setGroupTreatment(dd, k, { ...v, revision_id: rev.id }));
+    })) : null);
+}
+
+
+return { recognitionTab };
+})();
+
 // ---- ui/pricingView.js ----
 const __m_ui_pricingView_js = (function () {
 // 公告與合約：從已確認範圍名單勾選調高品項、登錄價格／簽約要求／合約／預定註記、整批確認；合約與補充協議、附件、到期提醒（第9.2、10節）。
@@ -7161,6 +7480,346 @@ async function download(env, a) {
 return { pricingTab };
 })();
 
+// ---- ui/queryView.js ----
+const __m_ui_queryView_js = (function () {
+// 品項明細（T21）：依藥品代碼回溯主檔、認定、案件與會議、範圍快照、調高、合約、註記、差異待辦；可匯出。
+const { h, table } = __m_ui_dom_js;
+const Q = __m_core_query_js;
+const M = __m_core_masterImport_js;
+const { taipeiToday } = __m_core_values_js;
+const { masterRows } = __m_ui_masterView_js;
+const { exportTable } = __m_ui_exportUI_js;
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+function queryTab(env) {
+  const { btn, guard, render } = env;
+  env.ui.query = env.ui.query || { code: '', day: taipeiToday(Date.now()), master: null };
+  const st = env.ui.query;
+  const d = data(env);
+  const code = h('input', { type: 'text', size: 14, value: st.code, 'aria-label': '藥品代碼', placeholder: '例 A000001100' });
+  const day = h('input', { type: 'text', size: 12, value: st.day, 'aria-label': '查詢日期' });
+  const run = () => guard(async () => {
+    st.code = code.value.trim();
+    st.day = day.value.trim() || taipeiToday(Date.now());
+    const imp = M.activeImport(d);
+    const rows = imp ? await masterRows(env.s, imp) : null;
+    st.master = rows ? rows.byCode.get(st.code) || null : null;
+    st.masterLabel = imp ? `${imp.base_date}（${imp.source_name}）` : null;
+  });
+  const box = h('section', { class: 'panel' }, h('h2', { text: '品項明細' }),
+    h('div', { class: 'filters' }, h('label', null, '藥品代碼 ', code), h('label', null, '查詢日期 ', day), btn('查詢', run, { primary: true })),
+    h('p', { class: 'note', text: '認定範圍、本次調高、主檔註記分開列示。有效狀態依查詢日期計算。' }));
+  if (!st.code) return box;
+  const dd = Q.drugDetail(d, st.code, st.day, { masterRow: st.master });
+  const lines = detailRows(dd, st);
+  box.appendChild(btn('匯出品項明細', () => guard(() => exportTable(env.s, { kind: '品項明細', condition: `藥品代碼=${st.code}`, day: st.day, headers: ['區塊', '日期', '項目', '內容', '狀態'], rows: lines }))));
+  const m = dd.master;
+  box.appendChild(h('h3', { text: `${st.code}${m ? ' ' + (m.drug_name || '') : ''}` }));
+  box.appendChild(h('p', { text: m ? `目前主檔 ${st.masterLabel}：分組 ${m.group_code || '（空白）'}；ATC ${m.atc_code || ''}；廠商 ${m.firm || ''}；支付價 ${m.price || ''}；必要藥品註記 ${m.annotation ?? ''}`
+    : st.masterLabel ? `目前主檔 ${st.masterLabel} 無此代碼（不視為取消）。` : '尚無已啟用主檔。' }));
+  const cat = dd.category;
+  box.appendChild(h('p', { class: cat.conflict ? 'warn-text' : '', text: `認定類別（${st.day}）：${cat.conflict ? '類別衝突，不產生單一類別：' + cat.sources.map((x) => `${x.name}（${x.category}）`).join('、') : cat.category || '無有效認定'}` }));
+  box.appendChild(h('p', { text: `主檔註記（系統，${st.day}）：${dd.annotation.category || '無'}${dd.annotation.upcoming ? `；待生效：${dd.annotation.upcoming.action} ${dd.annotation.upcoming.category || ''} ${dd.annotation.upcoming.effective_date}` : ''}${dd.annotation.unknown_date ? '；有生效日未知之事件' : ''}` }));
+  const sec = (title, headers, rows) => [h('h3', { text: `${title}（${rows.length}）` }), rows.length ? table(headers, rows) : h('p', { class: 'note', text: '無' })];
+  box.append(...sec('認定', ['認定', '版本', '類別', '期間', '狀態', '涵蓋'], dd.recognitions.map((r) => [`${r.recognition_no} ${r.name}`, r.revision_no, r.category, `${r.effective_from || '起日未知'}～${r.effective_to || ''}`, r.state, r.covers ? '是' : '否'])));
+  box.append(...sec('案件與會議', ['案件', '主旨', '處理狀態', '結果摘要', '逐次結果'], dd.cases.map((c) => [c.case_no, c.subject, c.status, c.summary, c.results.map((r) => `${r.meeting_date || '日期未知'} ${r.meeting_name} ${r.nature}：${r.result}${r.superseded ? '（已更正）' : ''}`).join('；')])));
+  box.append(...sec('範圍快照', ['認定', '版本', '主檔基準日', '判定', '人工確認', '快照狀態', '分組'], dd.snapshots.map((x) => [x.recognition, x.revision_no, x.base_date, x.eval_result, x.manual_result || '', x.status, x.group_code || ''])));
+  box.append(...sec('調高', ['認定', '調高前→後', '生效日', '公告文號', '簽約要求', '確認', '完整性'], dd.prices.map((p) => [`${p.recognition} 第${p.revision_no}版`, `${p.price_before || '—'} → ${p.price_after || '—'}`, p.effective_date || '', p.announce_doc_no || '', p.contract_requirement, p.superseded ? `${p.confirm_status}（已更正取代）` : p.confirm_status, p.completeness])));
+  box.append(...sec('合約', ['合約編號', '廠商', '狀態', '簽訂日', '到期日', '品項適用期間'], dd.contracts.map((c) => [c.contract_no, c.firm || '', c.status, c.signed_date || '', c.expiry_date || '（無）', `${c.item.effective_from || ''}～${c.item.effective_to || ''}`])));
+  box.append(...sec('註記事件', ['動作', '類別', '生效日', '依據', '確認'], dd.annotations.map((a) => [a.action, a.category || '', a.effective_date || '（未知）', a.basis || '', a.confirm_status])));
+  box.append(...sec('差異待辦', ['種類', '說明', '狀態', '結論'], dd.todos.map((t) => [t.kind, t.detail || '', t.status, t.conclusion || ''])));
+  return box;
+}
+
+function detailRows(dd, st) {
+  const out = [];
+  const m = dd.master;
+  out.push(['主檔', st.masterLabel || '', '主檔列', m ? `${m.drug_name || ''}｜分組 ${m.group_code || ''}｜ATC ${m.atc_code || ''}｜支付價 ${m.price || ''}｜註記 ${m.annotation ?? ''}` : '目前主檔無此代碼', '']);
+  out.push(['認定類別', st.day, '查詢日類別', dd.category.conflict ? '類別衝突' : dd.category.category || '無有效認定', '']);
+  for (const r of dd.recognitions) out.push(['認定', r.effective_from ? { date: r.effective_from } : '', `${r.recognition_no} ${r.name} 第${r.revision_no}版`, r.category, r.state]);
+  for (const c of dd.cases) for (const x of c.results) out.push(['會議', x.meeting_date ? { date: x.meeting_date } : '', `${c.case_no} ${x.meeting_name}`, `${x.nature}：${x.result}${x.conditions ? '（' + x.conditions + '）' : ''}`, x.superseded ? '已更正' : '']);
+  for (const p of dd.prices) out.push(['調高', p.effective_date ? { date: p.effective_date } : '', `${p.recognition} 第${p.revision_no}版`, `${p.price_before || ''} → ${p.price_after || ''}；${p.contract_requirement}`, p.superseded ? '已更正取代' : p.confirm_status]);
+  for (const c of dd.contracts) out.push(['合約', c.signed_date ? { date: c.signed_date } : '', c.contract_no, `${c.firm || ''} 到期 ${c.expiry_date || '無'}`, c.status]);
+  for (const a of dd.annotations) out.push(['註記', a.effective_date ? { date: a.effective_date } : '', a.action, a.category || '', a.confirm_status]);
+  for (const t of dd.todos) out.push(['差異待辦', '', t.kind, t.detail || '', t.status]);
+  return out;
+}
+
+return { queryTab };
+})();
+
+// ---- core/diff.js ----
+const __m_core_diff_js = (function () {
+// 差異待辦（T13、T14）與主檔註記比對（§9.2-11）。新主檔匯入後比對已確認認定：新符合、不再符合、分組異動、主檔消失、規則停用；
+// 主檔註記比對：一致／應有未有／主檔有但無完整依據／類別不同／無法判定。不自動註記、調高或更新正式主檔。
+// 計算（非同步，讀主檔列）於 run 之外完成，結果以 addTodos 於 run 內寫入。
+const { SpecError } = __m_core_errors_js;
+const { insert, update, must, list, find } = __m_core_model_js;
+const { previewRule, exclusionOf, canonical } = __m_core_rules_js;
+const { revisionScope } = __m_core_recognition_js;
+const { annotationOn } = __m_core_pricing_js;
+const TODO_KINDS = ['新符合', '不再符合', '分組異動', '主檔消失', '規則停用', '主檔註記不一致'];
+
+function txt(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+function confirmedRevisions(data) {
+  const replaced = new Set(list(data, 'recognition_revision').filter((r) => r.confirm_status === '已確認' && r.supersedes_id).map((r) => r.supersedes_id));
+  return list(data, 'recognition_revision').filter((r) => r.confirm_status === '已確認' && r.rule && r.category !== '取消認定' && !replaced.has(r.id));
+}
+
+function snapshotGroups(data, revId) {
+  const rev = must(data, 'recognition_revision', revId);
+  const out = new Map();
+  for (const s of list(data, 'scope_snapshot')) {
+    if (s.revision_id !== revId || s.status !== '已確認' || !s.rule || canonical(s.rule) !== canonical(rev.rule)) continue;
+    for (const m of list(data, 'scope_member')) if (m.snapshot_id === s.id && m.group_code) out.set(m.drug_code, m.group_code);
+  }
+  return out;
+}
+
+// 計算差異待辦項目（不寫入）；rows＝新主檔列（{byCode}）
+async function computeDiffTodos(data, imp, rows, settings, { tick } = {}) {
+  if (!imp || imp.status !== '已啟用') throw new SpecError('MASTER_NOT_ACTIVE', '差異比對須使用已啟用之主檔版本');
+  const exclusions = exclusionOf(settings);
+  const items = [];
+  const revs = confirmedRevisions(data);
+  let i = 0;
+  for (const rev of revs) {
+    i += 1;
+    if (tick) await tick(i, revs.length);
+    const scope = revisionScope(data, rev.id);
+    if (!scope.size) continue;
+    let pv;
+    try {
+      pv = await previewRule(rev.rule, rows, imp, { exclusions, threshold: Infinity });
+    } catch (e) {
+      if (e && e.code === 'FIELD_DISABLED') {
+        items.push({ kind: '規則停用', drug_code: null, group_code: null, revision_id: rev.id, detail: `${e.message}；此認定本次停用比對，未產生新符合／不再符合` });
+        continue;
+      }
+      throw e;
+    }
+    const hit = new Map(pv.members.map((m) => [m.drug_code, m]));
+    const groups = snapshotGroups(data, rev.id);
+    for (const m of pv.members) {
+      if (!scope.has(m.drug_code)) items.push({ kind: '新符合', drug_code: m.drug_code, group_code: m.group_code, revision_id: rev.id, detail: `${m.result}：${m.path || ''}；須確認後形成新快照，不自動註記或調高` });
+    }
+    for (const code of [...scope].sort()) {
+      const d = rows.byCode.get(code);
+      if (!d) { items.push({ kind: '主檔消失', drug_code: code, group_code: groups.get(code) || null, revision_id: rev.id, detail: '新主檔無此代碼；不自動刪除認定或解讀成取消給付' }); continue; }
+      if (!hit.has(code)) items.push({ kind: '不再符合', drug_code: code, group_code: d.group_code || null, revision_id: rev.id, detail: '新主檔依目前條件為不符合或屬全域排除；認定與註記不自動變更' });
+      const g0 = groups.get(code);
+      const g1 = d.group_code || null;
+      if (g0 && g0 !== g1) items.push({ kind: '分組異動', drug_code: code, group_code: g1, revision_id: rev.id, detail: `快照分組 ${g0} → 新主檔 ${g1 || '（空白）'}；歷史快照不變` });
+    }
+  }
+  return items;
+}
+
+// 寫入差異待辦（同種類＋品項＋認定版本＋主檔版本不重複）
+function addTodos(data, ctx, importId, items) {
+  must(data, 'master_import', importId);
+  const key = (k, c, r) => `${k}|${c || ''}|${r || ''}`;
+  const seen = new Set(list(data, 'review_item').filter((t) => t.import_id === importId).map((t) => key(t.kind, t.drug_code, t.revision_id)));
+  let added = 0;
+  for (const it of items) {
+    const k = key(it.kind, it.drug_code, it.revision_id);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    insert(data, ctx, 'review_item', { kind: it.kind, drug_code: it.drug_code || null, group_code: it.group_code || null, revision_id: it.revision_id || null, import_id: importId, detail: it.detail || null });
+    added += 1;
+  }
+  return { added, skipped: items.length - added };
+}
+
+function resolveTodo(data, ctx, id, status, conclusion) {
+  const t = must(data, 'review_item', id);
+  if (status !== '已處理' && status !== '不處理') throw new SpecError('BAD_VALUE', '處理結果須為「已處理」或「不處理」');
+  if (!txt(conclusion)) throw new SpecError('REQUIRED', '請填寫處理結論');
+  if (t.status !== '待處理') throw new SpecError('ALREADY', '此待辦已處理；如需改結論請另記於新待辦或備註');
+  return update(data, ctx, 'review_item', id, { status, conclusion: txt(conclusion) });
+}
+
+function listTodos(data, { kind, status, importId, drugCode } = {}) {
+  return list(data, 'review_item').filter((t) => (!kind || t.kind === kind) && (!status || t.status === status) && (!importId || t.import_id === importId) && (!drugCode || t.drug_code === drugCode))
+    .sort((a, b) => (a.kind === b.kind ? ((a.drug_code || '') < (b.drug_code || '') ? -1 : 1) : TODO_KINDS.indexOf(a.kind) - TODO_KINDS.indexOf(b.kind)));
+}
+
+// ---------- 主檔註記比對 ----------
+function parseCodeMap(text) {
+  const map = {};
+  for (const part of String(text || '').split(/[,，;；]+/)) {
+    const m = part.split('=');
+    if (m.length !== 2) continue;
+    const k = m[0].trim();
+    const v = m[1].trim();
+    if (k && v) map[k] = v;
+  }
+  return map;
+}
+
+// rows：該主檔版本列（{byCode}）；必要藥品註記空白已於匯入時正規化為 0（一般藥品）
+function compareMaster(data, rows, day, settings) {
+  const cmap = parseCodeMap(settings && settings.annotation_code_map);
+  const rev = {};
+  for (const [k, v] of Object.entries(cmap)) rev[v] = k;
+  const codes = new Set(list(data, 'annotation_event').filter((e) => e.confirm_status === '已確認').map((e) => e.drug_code));
+  for (const [c, d] of rows.byCode) if (d.annotation && rev[d.annotation]) codes.add(c);
+  const out = [];
+  for (const code of [...codes].sort()) {
+    const st = annotationOn(data, code, day);
+    const d = rows.byCode.get(code);
+    const sys = st.category;
+    let result;
+    let detail;
+    if (!d) { result = '無法判定'; detail = '主檔版本無此代碼（以來源涵蓋範圍判讀，不視為取消）'; }
+    else if (d.annotation === undefined || d.annotation === null) { result = '無法判定'; detail = '主檔版本未映射必要藥品註記欄'; }
+    else if (st.unknown_date && !sys) { result = '無法判定'; detail = '系統註記生效日未知'; }
+    else {
+      const raw = String(d.annotation); // 匯入時已正規化：空白＝0（一般藥品）
+      const mcat = rev[raw] || null;
+      if (!mcat && raw !== '0' && !['1', '2'].includes(raw)) { result = '無法判定'; detail = `必要藥品註記值 ${raw} 無對照設定`; }
+      else if (sys && mcat) { result = cmap[sys] === raw ? '一致' : '類別不同'; detail = `系統：${sys}；主檔：${mcat}（${raw}）`; }
+      else if (sys && !mcat) { result = '應有未有'; detail = `系統：${sys}；主檔必要藥品註記為 ${raw}`; }
+      else if (!sys && mcat) { result = '主檔有但無完整依據'; detail = `主檔：${mcat}（${raw}）；系統無已確認註記`; }
+      else { result = '一致'; detail = '皆無註記'; }
+    }
+    out.push({ drug_code: code, drug_name: d ? d.drug_name || null : null, result, detail, system_category: sys, master_raw: d ? d.annotation ?? null : null });
+  }
+  return out;
+}
+
+function compareCounts(items) {
+  const c = {};
+  for (const it of items) c[it.result] = (c[it.result] || 0) + 1;
+  return c;
+}
+
+// 不一致項目轉為差異待辦
+function mismatchTodos(items) {
+  return items.filter((x) => x.result !== '一致').map((x) => ({ kind: '主檔註記不一致', drug_code: x.drug_code, revision_id: null, group_code: null, detail: `${x.result}：${x.detail}` }));
+}
+
+function importLabel(data, importId) {
+  const m = find(data, 'master_import', importId);
+  return m ? `${m.base_date}（${m.source_name}）` : '';
+}
+
+return { TODO_KINDS, computeDiffTodos, addTodos, resolveTodo, listTodos, parseCodeMap, compareMaster, compareCounts, mismatchTodos, importLabel };
+})();
+
+// ---- ui/diffView.js ----
+const __m_ui_diffView_js = (function () {
+// 差異待辦與主檔註記比對：依目前主檔產生差異待辦（新符合、不再符合、分組異動、主檔消失、規則停用）、主檔註記比對、處理結論、匯出。
+const { h, table, alertBox } = __m_ui_dom_js;
+const { formDialog, opts } = __m_ui_forms_js;
+const D = __m_core_diff_js;
+const M = __m_core_masterImport_js;
+const { E, find } = __m_core_model_js;
+const { taipeiToday } = __m_core_values_js;
+const { newId } = __m_core_util_js;
+const { masterRows } = __m_ui_masterView_js;
+const { exportTable } = __m_ui_exportUI_js;
+const PAGE = 200;
+
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+function revLabelOf(d, revId) {
+  const r = revId ? find(d, 'recognition_revision', revId) : null;
+  if (!r) return '';
+  const rec = find(d, 'recognition', r.recognition_id) || {};
+  return `${rec.recognition_no || ''} ${rec.name || ''} 第${r.revision_no}版`;
+}
+
+function diffTab(env) {
+  const { s, btn, guard, render } = env;
+  env.ui.diff = env.ui.diff || { kind: '', status: '待處理', page: 0, compare: null, day: taipeiToday(Date.now()) };
+  const st = env.ui.diff;
+  const d = data(env);
+  const imp = M.activeImport(d);
+  const kindSel = h('select', { 'aria-label': '待辦種類' }, [['', '（全部種類）'], ...opts(D.TODO_KINDS)].map(([v, l]) => h('option', { value: v, text: l, selected: v === st.kind })));
+  const stSel = h('select', { 'aria-label': '處理狀態' }, [['', '（全部狀態）'], ...opts(E.REVIEW_STATUS)].map(([v, l]) => h('option', { value: v, text: l, selected: v === st.status })));
+  const todos = D.listTodos(d, { kind: st.kind || null, status: st.status || null });
+  const pageRows = todos.slice(st.page * PAGE, (st.page + 1) * PAGE);
+  const t = table(['種類', '藥品代碼', '分組', '認定版本', '主檔版本', '說明', '狀態', '結論', ''], pageRows.map((x) => [
+    x.kind, x.drug_code || '', x.group_code || '', revLabelOf(d, x.revision_id), D.importLabel(d, x.import_id), x.detail || '', x.status, x.conclusion || '',
+    s.mode === 'edit' && x.status === '待處理' ? btn('處理', () => guard(() => resolveUI(env, x))) : '']));
+  const condition = `種類=${st.kind || '全部'}；狀態=${st.status || '全部'}`;
+  const box = h('section', { class: 'panel' }, h('h2', { text: '差異待辦' }),
+    h('p', { class: 'note', text: '新主檔啟用後比對已確認認定：新符合須確認後形成新快照；不自動註記、調高或刪除認定；歷史快照不變。' }),
+    s.mode === 'edit' ? h('div', { class: 'toolbar' },
+      btn(`依目前主檔產生差異待辦${imp ? `（${imp.base_date}）` : ''}`, () => guard(() => generate(env)), { primary: true, disabled: !imp })) : null,
+    h('div', { class: 'filters' }, h('label', null, '種類 ', kindSel), h('label', null, '狀態 ', stSel),
+      btn('篩選', () => { st.kind = kindSel.value; st.status = stSel.value; st.page = 0; render(); }),
+      btn('匯出差異待辦', () => guard(() => exportTable(s, { kind: '差異待辦', condition, day: taipeiToday(Date.now()),
+        headers: ['種類', '藥品代碼', '分組', '認定版本', '主檔版本', '說明', '狀態', '結論'],
+        rows: todos.map((x) => [x.kind, x.drug_code || '', x.group_code || '', revLabelOf(d, x.revision_id), D.importLabel(d, x.import_id), x.detail || '', x.status, x.conclusion || '']) })))),
+    h('p', { class: 'note', text: `共 ${todos.length} 筆${todos.length > PAGE ? `，第 ${st.page + 1} 頁（每頁 ${PAGE}）` : ''}。` }),
+    todos.length > PAGE ? h('div', { class: 'pager' }, btn('上一頁', () => { st.page = Math.max(0, st.page - 1); render(); }, { disabled: st.page === 0 }),
+      btn('下一頁', () => { st.page += 1; render(); }, { disabled: (st.page + 1) * PAGE >= todos.length })) : null,
+    todos.length ? t : h('p', { class: 'note', text: '無符合之待辦。' }));
+  return h('div', null, box, comparePanel(env, imp));
+}
+
+async function generate(env) {
+  const d = data(env);
+  const imp = M.activeImport(d);
+  const rows = await masterRows(env.s, imp);
+  const items = await D.computeDiffTodos(d, imp, rows, env.s.settings);
+  const r = await env.s.run((dd, k) => D.addTodos(dd, k, imp.id, items), { opId: newId(), kind: '產生差異待辦' });
+  const c = {};
+  for (const it of items) c[it.kind] = (c[it.kind] || 0) + 1;
+  await alertBox('差異待辦', `比對主檔 ${imp.base_date}：新增 ${r.added} 筆，已存在略過 ${r.skipped} 筆。`, Object.entries(c).map(([k, v]) => `${k} ${v}`).join('、') || '無差異');
+}
+
+async function resolveUI(env, x) {
+  const v = await formDialog(`處理差異待辦：${x.kind} ${x.drug_code || ''}`, [
+    { key: 'status', label: '處理結果', type: 'select', options: [['已處理', '已處理'], ['不處理', '不處理']], value: '已處理' },
+    { key: 'conclusion', label: '處理結論', type: 'textarea', required: true }]);
+  if (!v) return;
+  await env.s.run((dd, k) => D.resolveTodo(dd, k, x.id, v.status, v.conclusion));
+}
+
+function comparePanel(env, imp) {
+  const { s, btn, guard, render } = env;
+  const st = env.ui.diff;
+  const day = h('input', { type: 'text', size: 12, value: st.day, 'aria-label': '比對日期' });
+  const box = h('section', { class: 'panel' }, h('h2', { text: '主檔註記比對' }),
+    h('p', { class: 'note', text: `以目前主檔「必要藥品」註記與系統已確認註記事件比對（空白＝0 一般藥品；對照：${s.settings.annotation_code_map}）。本系統不直接更新正式主檔。` }),
+    h('div', { class: 'filters' }, h('label', null, '比對日期 ', day),
+      btn('執行比對', () => guard(async () => {
+        st.day = day.value.trim() || taipeiToday(Date.now());
+        const rows = await masterRows(s, imp);
+        st.compare = { imp: imp.id, items: D.compareMaster(data(env), rows, st.day, s.settings) };
+      }), { disabled: !imp })));
+  if (!st.compare || !imp || st.compare.imp !== imp.id) return box;
+  const items = st.compare.items;
+  const cnt = D.compareCounts(items);
+  const bad = items.filter((x) => x.result !== '一致');
+  box.appendChild(h('p', { text: `比對 ${items.length} 項：` + E.ANNOTATION_COMPARE.map((k) => `${k} ${cnt[k] || 0}`).join('、') }));
+  box.appendChild(h('div', { class: 'toolbar' },
+    btn('匯出比對結果', () => guard(() => exportTable(s, { kind: '查詢結果', condition: `主檔註記比對；主檔 ${imp.base_date}`, day: st.day,
+      headers: ['藥品代碼', '品名', '比對結果', '說明', '系統類別', '主檔必要藥品註記'], rows: items.map((x) => [x.drug_code, x.drug_name || '', x.result, x.detail, x.system_category || '', x.master_raw ?? '']) }))),
+    s.mode === 'edit' && bad.length ? btn(`不一致 ${bad.length} 項轉為差異待辦`, () => guard(async () => {
+      const r = await s.run((dd, k) => D.addTodos(dd, k, imp.id, D.mismatchTodos(items)), { opId: newId(), kind: '註記比對轉待辦' });
+      await alertBox('已轉為差異待辦', `新增 ${r.added} 筆，已存在略過 ${r.skipped} 筆。`);
+    })) : null));
+  box.appendChild(table(['藥品代碼', '品名', '比對結果', '說明'], bad.slice(0, PAGE).map((x) => [x.drug_code, x.drug_name || '', x.result, x.detail])));
+  if (bad.length > PAGE) box.appendChild(h('p', { class: 'note', text: `僅顯示前 ${PAGE} 筆不一致項目；完整結果請匯出。` }));
+  return box;
+}
+
+return { diffTab };
+})();
+
 // ---- ui/main.js ----
 const __m_ui_main_js = (function () {
 // 介面：啟動、狀態列、編輯牌操作、儲存歷程、設定、關於。只呼叫業務模組函式改資料。
@@ -7182,6 +7841,10 @@ const { masterTab, masterStatusText } = __m_ui_masterView_js;
 const { ruleTab } = __m_ui_ruleView_js;
 const { recognitionTab } = __m_ui_recognitionView_js;
 const { pricingTab } = __m_ui_pricingView_js;
+const { queryTab } = __m_ui_queryView_js;
+const { diffTab } = __m_ui_diffView_js;
+const X = __m_core_exporter_js;
+const { sha256Bytes } = __m_core_util_js;
 const PROFILE_KEY = 'specdrug.profile';
 // 同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。使用者 2026-11-06 同意（單人使用）。
 const LOCAL_CLOSED_RELEASE = true;
@@ -7617,7 +8280,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -7710,6 +8373,7 @@ function renderHome() {
 
 let historyCache = null;
 
+let exportLogCache = null;
 function renderHistory() {
   const s = ui.session;
   const box = h('section', { class: 'panel' }, h('h2', { text: '儲存歷程' }),
@@ -7725,6 +8389,20 @@ function renderHistory() {
       btn('唯讀檢視', () => guard(() => viewVersion(r.name))),
     ])));
   }
+  box.appendChild(h('h3', { text: '匯出紀錄' }));
+  box.appendChild(h('div', { class: 'toolbar' },
+    btn('讀取匯出紀錄', () => guard(async () => { exportLogCache = { all: await X.readExportLog(s.fs), found: null }; })),
+    h('label', null, '依檔案反查來源版本（H16） ', h('input', { type: 'file', 'aria-label': '反查匯出檔', on: { change: (e) => { const f = e.target.files[0]; if (f) guard(async () => {
+      const sha = await sha256Bytes(new Uint8Array(await f.arrayBuffer()));
+      exportLogCache = { all: exportLogCache ? exportLogCache.all : await X.readExportLog(s.fs), found: { name: f.name, sha, rows: await X.findExportBySha(s.fs, sha) } };
+    }); } } }))));
+  if (exportLogCache && exportLogCache.found) {
+    const fd = exportLogCache.found;
+    box.appendChild(h('p', { class: fd.rows.length ? '' : 'warn-text', text: fd.rows.length ? `「${fd.name}」（SHA-256 ${fd.sha.slice(0, 16)}…）為以下匯出：` : `「${fd.name}」（SHA-256 ${fd.sha.slice(0, 16)}…）查無匯出紀錄（檔案可能被修改或非本資料夾匯出）。` }));
+  }
+  const logRows = exportLogCache ? (exportLogCache.found ? exportLogCache.found.rows : exportLogCache.all.slice(-50).reverse()) : [];
+  if (exportLogCache) box.appendChild(table(['匯出時間', '檔名', '種類', '條件', '筆數', 'revision', '程式版本', '操作者', 'SHA-256前16碼'], logRows.map((e) => e.broken ? ['（無法解析之列）', e.raw, '', '', '', '', '', '', ''] :
+    [fmtIso(e.exported_at), e.file_name, e.kind, e.condition || '', String(e.count), X.revisionTag(e.revision, e.unsaved), e.app_version, e.actor || '', (e.sha256 || '').slice(0, 16)])));
   const audit = s.committed.audit.slice(-50).reverse();
   box.appendChild(h('h3', { text: '稽核紀錄（最近50筆）' }));
   box.appendChild(table(['序號', '時間', '操作者', '動作', '原因'], audit.map((e) => [e.seq, fmtIso(e.at), who(e), e.action, e.reason || ''])));
@@ -7804,7 +8482,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
