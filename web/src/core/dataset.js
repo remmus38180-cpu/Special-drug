@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = {
   large_scope_threshold: 500,
   scope_exclude_code_prefixes: 'TPN',
   scope_exclude_web_hidden: true,
+  annotation_code_map: '不可替代特殊藥品=3, 特殊藥品=4',
 };
 
 const SETTING_RULES = {
@@ -31,7 +32,20 @@ const SETTING_RULES = {
   large_scope_threshold: { type: 'int', min: 1, max: 100000, label: '範圍過大警示門檻（筆）' },
   scope_exclude_code_prefixes: { type: 'text', max: 200, label: '範圍全域排除：藥品代碼前綴（逗號分隔）' },
   scope_exclude_web_hidden: { type: 'bool', label: '範圍全域排除：不上網註＝Y' },
+  annotation_code_map: { type: 'text', max: 200, label: '認定類別↔主檔必要藥品註記代碼（類別=代碼，逗號分隔）', check: checkCodeMap },
 };
+
+function checkCodeMap(v) {
+  const parts = v.split(/[,，;；]+/).map((x) => x.trim()).filter(Boolean);
+  const seen = new Set();
+  for (const p of parts) {
+    const m = /^(不可替代特殊藥品|特殊藥品)\s*=\s*([A-Za-z0-9]{1,4})$/.exec(p);
+    if (!m) return `「${p}」格式應為「不可替代特殊藥品=3」或「特殊藥品=4」`;
+    if (seen.has(m[1])) return `類別「${m[1]}」重複`;
+    seen.add(m[1]);
+  }
+  return null;
+}
 
 export function settingLabel(key) {
   return SETTING_RULES[key] ? SETTING_RULES[key].label : key;
@@ -62,7 +76,9 @@ export function validateSettingsPatch(current, patch) {
       }
     } else if (rule.type === 'text') {
       v = String(raw ?? '').trim();
-      if (v.length > rule.max || /[^A-Za-z0-9,，、\s]/.test(v)) throw new SpecError('BAD_VALUE', `${rule.label}只可填英數字，以逗號分隔`);
+      if (v.length > rule.max) throw new SpecError('BAD_VALUE', `${rule.label}過長`);
+      if (rule.check) { const m = rule.check(v); if (m) throw new SpecError('BAD_VALUE', `${rule.label}：${m}`); }
+      else if (/[^A-Za-z0-9,，、\s]/.test(v)) throw new SpecError('BAD_VALUE', `${rule.label}只可填英數字，以逗號分隔`);
     } else {
       if (typeof raw !== 'boolean') throw new SpecError('BAD_VALUE', `${rule.label}須為是／否`);
       v = raw;

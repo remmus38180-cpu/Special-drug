@@ -9,6 +9,8 @@ import { taipeiToday } from '../core/values.js';
 import { newId, deepClone } from '../core/util.js';
 import { ruleEditor, previewPanel } from './ruleView.js';
 import { masterRows } from './masterView.js';
+import { exportTable } from './exportUI.js';
+import { recognitionExportRows } from '../core/query.js';
 
 const PAGE = 100;
 
@@ -44,7 +46,8 @@ function listView(env) {
   return h('section', { class: 'panel' }, h('h2', { text: '認定清單' }),
     h('div', { class: 'filters' }, h('label', null, '關鍵字 ', kw), h('label', null, '查詢日期 ', day),
       btn('查詢', () => { st.keyword = kw.value.trim() || null; st.day = day.value.trim() || today(); render(); })),
-    s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('新增認定項目', () => guard(() => newRecognition(env)), { primary: true })) : null,
+    h('div', { class: 'toolbar' }, s.mode === 'edit' ? btn('新增認定項目', () => guard(() => newRecognition(env)), { primary: true }) : null,
+      btn('匯出認定清單', () => guard(() => { const ex = recognitionExportRows(d, st.day); return exportTable(s, { kind: '認定清單', condition: '全部認定項目（每版本一列）', day: st.day, headers: ex.headers, rows: ex.rows }); }))),
     h('p', { class: 'note', text: `共 ${rows.length} 項。有效狀態依查詢日期計算；未到生效日之已確認版本顯示待生效。` }), t);
 }
 

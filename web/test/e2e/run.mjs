@@ -42,6 +42,14 @@ await ctx.addInitScript(() => {
     const root = await navigator.storage.getDirectory();
     return root.getDirectoryHandle(window.localStorage.getItem('e2e.dir') || 'f1', { create: true });
   };
+  // 另存對話框：寫入 OPFS exports/，記錄檔名
+  window.showSaveFilePicker = async ({ suggestedName }) => {
+    const root = await navigator.storage.getDirectory();
+    const d = await root.getDirectoryHandle('exports', { create: true });
+    window.__saved = (window.__saved || []).concat([suggestedName]);
+    // headless Chromium 之 OPFS 不接受中文檔名：以編碼後名稱存放（僅測試替身）
+    return d.getFileHandle('f' + window.__saved.length, { create: true });
+  };
 });
 const external = [];
 const consoleErrors = [];
@@ -347,9 +355,42 @@ try {
   await p3.getByRole('button', { name: '確認公告（勾選之調高及其註記）' }).click();
   await clickDlg(p3, '確認');
   await paSec.locator('td', { hasText: '已確認' }).first().waitFor();
+  const paCode = (await paSec.locator('tbody tr').first().locator('td').nth(1).innerText()).trim();
   check('確認公告：調高與註記皆已確認', (await p3.locator('section.panel', { hasText: '註記事件（' }).innerText()).includes('已確認'));
   await p3.getByRole('button', { name: '儲存', exact: true }).click();
   await p3.locator('.statusbar', { hasText: '未儲存變更：0' }).waitFor({ timeout: 10000 });
+  // 階段8：品項查詢、差異待辦、註記比對、匯出與反查
+  await p3.getByRole('button', { name: '品項查詢', exact: true }).click();
+  await p3.getByLabel('藥品代碼').fill(paCode);
+  await p3.getByRole('button', { name: '查詢', exact: true }).click();
+  await p3.locator('h3', { hasText: '調高（1）' }).waitFor();
+  const qText = await p3.locator('section.panel').first().innerText();
+  check('T21 品項查詢：認定、調高、合約、註記可回溯', qText.includes('介面測試認定') && qText.includes('4.38') && qText.includes('註記事件（1）'), qText.replace(/\s+/g, ' ').slice(0, 120));
+  await p3.getByRole('button', { name: '差異待辦', exact: true }).click();
+  await p3.getByRole('button', { name: /依目前主檔產生差異待辦/ }).click();
+  await p3.locator('dialog.dlg').waitFor();
+  check('差異待辦：可依目前主檔產生', (await dlgText(p3)).includes('比對主檔'), (await dlgText(p3)).replace(/\s+/g, ' '));
+  await clickDlg(p3, '確定');
+  await p3.getByRole('button', { name: '執行比對' }).click();
+  await p3.locator('p', { hasText: /^比對 \d+ 項/ }).waitFor();
+  check('主檔註記比對：列出結果分類', (await p3.locator('p', { hasText: /^比對 \d+ 項/ }).innerText()).includes('應有未有'));
+  await p3.getByRole('button', { name: '儲存', exact: true }).click();
+  await p3.locator('.statusbar', { hasText: '未儲存變更：0' }).waitFor({ timeout: 10000 });
+  await p3.getByRole('button', { name: '認定', exact: true }).click();
+  for (let i = 0; i < 2; i++) {
+    await p3.getByRole('button', { name: '匯出認定清單' }).click();
+    await clickDlg(p3, '匯出');
+    await p3.waitForFunction((n) => (window.__saved || []).length >= n, i + 1);
+    await p3.waitForTimeout(300);
+  }
+  const saved = await p3.evaluate(() => window.__saved);
+  check('H15 匯出檔名：依規則、不重複、含revision', saved.length === 2 && saved[0] !== saved[1] && saved.every((x) => /^特藥_認定清單_\d{8}-\d{6}(-\d+)?_r\d{6}\.xlsx$/.test(x)), saved.join(' / '));
+  const bytes = await p3.evaluate(async (n) => { const root = await navigator.storage.getDirectory(); const d = await root.getDirectoryHandle('exports'); const f = await (await d.getFileHandle('f1')).getFile(); return Array.from(new Uint8Array(await f.arrayBuffer())); }, saved[0]);
+  await p3.getByRole('button', { name: '儲存歷程', exact: true }).click();
+  await p3.getByLabel('反查匯出檔').setInputFiles({ name: '改名後.xlsx', mimeType: 'application/octet-stream', buffer: Buffer.from(bytes) });
+  await p3.locator('p', { hasText: '「改名後.xlsx」' }).waitFor();
+  const hist = await p3.locator('section.panel').first().innerText();
+  check('H16 改名後依SHA-256反查匯出紀錄', hist.includes('為以下匯出') && hist.includes(saved[0]), hist.replace(/\s+/g, ' ').slice(-200));
   await p3.getByRole('button', { name: '首頁', exact: true }).click();
   await p3.getByRole('button', { name: '結束編輯' }).click();
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });

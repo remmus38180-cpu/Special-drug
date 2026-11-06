@@ -72,7 +72,10 @@ const FORBIDDEN = [
   [/<iframe/i, 'iframe'], [/importScripts\s*\(/, 'importScripts'], [/\bfetch\s*\(/, 'fetch('], [/XMLHttpRequest/, 'XMLHttpRequest'],
   [/window\.open\s*\(/, 'window.open'], [/https?:\/\//, '網址'],
 ];
-const problems = FORBIDDEN.filter(([re]) => re.test(html)).map(([, label]) => label);
+// xlsx 格式必備之 XML 命名空間識別字串（不連線、不載入資源）；僅放行下列固定前綴，其餘網址一律擋
+const XML_NS = ['http://schemas.openxmlformats.org', 'http://purl.org/dc/elements/1.1/', 'http://purl.org/dc/terms/', 'http://www.w3.org/2001/XMLSchema-instance'];
+const scan = XML_NS.reduce((t, ns) => t.split(ns).join('XMLNS:'), html);
+const problems = FORBIDDEN.filter(([re]) => re.test(scan)).map(([, label]) => label);
 if (problems.length) throw new Error('建置輸出含禁用內容：' + problems.join('、'));
 
 const outDir = resolve(here, 'dist');

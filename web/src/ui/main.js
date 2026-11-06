@@ -17,6 +17,10 @@ import { masterTab, masterStatusText } from './masterView.js';
 import { ruleTab } from './ruleView.js';
 import { recognitionTab } from './recognitionView.js';
 import { pricingTab } from './pricingView.js';
+import { queryTab } from './queryView.js';
+import { diffTab } from './diffView.js';
+import * as X from '../core/exporter.js';
+import { sha256Bytes } from '../core/util.js';
 
 const PROFILE_KEY = 'specdrug.profile';
 // 同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。使用者 2026-11-06 同意（單人使用）。
@@ -453,7 +457,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -546,6 +550,7 @@ function renderHome() {
 
 let historyCache = null;
 
+let exportLogCache = null;
 function renderHistory() {
   const s = ui.session;
   const box = h('section', { class: 'panel' }, h('h2', { text: '儲存歷程' }),
@@ -561,6 +566,20 @@ function renderHistory() {
       btn('唯讀檢視', () => guard(() => viewVersion(r.name))),
     ])));
   }
+  box.appendChild(h('h3', { text: '匯出紀錄' }));
+  box.appendChild(h('div', { class: 'toolbar' },
+    btn('讀取匯出紀錄', () => guard(async () => { exportLogCache = { all: await X.readExportLog(s.fs), found: null }; })),
+    h('label', null, '依檔案反查來源版本（H16） ', h('input', { type: 'file', 'aria-label': '反查匯出檔', on: { change: (e) => { const f = e.target.files[0]; if (f) guard(async () => {
+      const sha = await sha256Bytes(new Uint8Array(await f.arrayBuffer()));
+      exportLogCache = { all: exportLogCache ? exportLogCache.all : await X.readExportLog(s.fs), found: { name: f.name, sha, rows: await X.findExportBySha(s.fs, sha) } };
+    }); } } }))));
+  if (exportLogCache && exportLogCache.found) {
+    const fd = exportLogCache.found;
+    box.appendChild(h('p', { class: fd.rows.length ? '' : 'warn-text', text: fd.rows.length ? `「${fd.name}」（SHA-256 ${fd.sha.slice(0, 16)}…）為以下匯出：` : `「${fd.name}」（SHA-256 ${fd.sha.slice(0, 16)}…）查無匯出紀錄（檔案可能被修改或非本資料夾匯出）。` }));
+  }
+  const logRows = exportLogCache ? (exportLogCache.found ? exportLogCache.found.rows : exportLogCache.all.slice(-50).reverse()) : [];
+  if (exportLogCache) box.appendChild(table(['匯出時間', '檔名', '種類', '條件', '筆數', 'revision', '程式版本', '操作者', 'SHA-256前16碼'], logRows.map((e) => e.broken ? ['（無法解析之列）', e.raw, '', '', '', '', '', '', ''] :
+    [fmtIso(e.exported_at), e.file_name, e.kind, e.condition || '', String(e.count), X.revisionTag(e.revision, e.unsaved), e.app_version, e.actor || '', (e.sha256 || '').slice(0, 16)])));
   const audit = s.committed.audit.slice(-50).reverse();
   box.appendChild(h('h3', { text: '稽核紀錄（最近50筆）' }));
   box.appendChild(table(['序號', '時間', '操作者', '動作', '原因'], audit.map((e) => [e.seq, fmtIso(e.at), who(e), e.action, e.reason || ''])));
@@ -640,7 +659,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
