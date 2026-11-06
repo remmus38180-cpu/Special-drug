@@ -258,6 +258,26 @@ try {
   await p3.locator('.statusbar', { hasText: '主檔：測試主檔11511.csv（基準日 2026-11-01，3 筆）' }).waitFor({ timeout: 10000 });
   check('主檔啟用並儲存；狀態列顯示目前主檔版本', true);
   check('歷史版本：停用示範主檔', (await p3.locator('td', { hasText: '已停用' }).count()) === 1);
+  // 階段5：規則點選與預覽
+  await p3.getByRole('button', { name: '規則預覽', exact: true }).click();
+  await p3.getByRole('button', { name: '載入主檔選項' }).click();
+  await p3.getByRole('button', { name: '依分組加規格' }).click();
+  await p3.getByLabel('搜尋分組代碼').fill('G1A');
+  await p3.locator('.pick-item').first().click();
+  await p3.getByLabel('規格數值').fill('5');
+  await p3.getByLabel('規格數值').press('Tab');
+  await p3.getByLabel('規格單位').selectOption('ML');
+  const desc = await p3.locator('.rule-desc').innerText();
+  check('規則點選：選項由主檔產生，說明文字正確', desc.includes('分組代碼 屬於 G1AAA0000001') && desc.includes('規格 = 5 ML') && desc.includes('條件格式正確'), desc.replace(/\s+/g, ' '));
+  await p3.getByRole('button', { name: '預覽符合名單' }).click();
+  await p3.locator('h2', { hasText: '範圍預覽' }).waitFor();
+  const pvText = await p3.locator('section.panel', { hasText: '範圍預覽' }).innerText();
+  check('預覽：符合1、名單含A000001100', /符合\t1/.test(pvText) && pvText.includes('A000001100'), pvText.replace(/\s+/g, ' ').slice(0, 100));
+  await p3.getByRole('button', { name: '指定品項' }).click();
+  await p3.getByLabel('貼上藥品代碼').fill('B000004100 NOPE0000');
+  await p3.getByRole('button', { name: '加入', exact: true }).click();
+  check('指定品項：主檔無此值標示', (await p3.locator('.chip-warn', { hasText: 'NOPE0000' }).count()) === 1);
+  check('規則變更後須重新預覽', (await p3.locator('h2', { hasText: '範圍預覽' }).count()) === 0);
   await p3.getByRole('button', { name: '首頁', exact: true }).click();
   await p3.getByRole('button', { name: '結束編輯' }).click();
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });

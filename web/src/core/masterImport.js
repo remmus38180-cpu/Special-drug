@@ -27,8 +27,20 @@ export const RULE_FIELD_NEEDS = {
   group_code: ['group_code'], atc_code: ['atc_code'], dose_code: ['dose_code'], multi_mark: ['multi_mark'],
   spec: ['spec_qty', 'spec_unit'], firm: ['firm'], firm_code: ['firm_code'], ingredient: ['ingredient'], drug_code: ['drug_code'],
 };
-// 已知規格單位；不在清單內視為未知單位→規則判定待確認
+// 已知規格單位：優先取 DWM_DRUG_RCODE type 2（規格單位代碼）英文名；未提供代碼檔時用內建清單。
+// 不在清單內視為未知單位→規則判定待確認；單位間不自行換算。
 export const KNOWN_UNITS = ['ML', 'L', 'GM', 'MG', 'MCG', 'KG', 'IU', 'KIU', 'MIU', 'U', 'KU', 'MU', 'DOSE', 'MCL'];
+
+export function unitsFromRcode(rcode) {
+  const out = new Set();
+  for (const [k, v] of rcode) {
+    if (!k.startsWith('2|')) continue;
+    const u = normUnit(v.ename || v.cname);
+    if (u) out.add(u);
+  }
+  if (!out.size) throw new SpecError('RCODE', '代碼檔沒有 type 2（規格單位）資料');
+  return [...out].sort();
+}
 
 // 【設計建議】預設映射；匯入時仍由使用者確認
 export const PRESETS = [
@@ -155,7 +167,7 @@ function sameRec(a, b) {
 }
 
 // 試匯入：不寫任何檔案，回傳 {records(Map), check}
-export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, tick }) {
+export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, knownUnits, unitSource, tick }) {
   if (!mapping || !mapping.drug_code) throw new SpecError('MAP_REQUIRED', '必須映射「藥品代碼」欄位');
   const bad = Object.keys(mapping).filter((k) => !TARGETS.has(k));
   if (bad.length) throw new SpecError('MAP_UNKNOWN', '未知的映射目標：' + bad.join('、'));
@@ -172,6 +184,9 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
     if (i < 0) missingSrc.push(`${FIELD_LABEL[t]}←${name}`); else src[t] = i;
   }
   if (missingSrc.length) throw new SpecError('MAP_MISSING', '來源檔找不到映射欄位：' + missingSrc.join('、'));
+  const units = knownUnits ? [...knownUnits] : (rcode ? unitsFromRcode(rcode) : KNOWN_UNITS.slice());
+  const unitSet = new Set(units);
+  const unitFrom = unitSource || (knownUnits ? '指定' : rcode ? 'DWM_DRUG_RCODE type 2' : '內建清單');
   const wanted = new Set(Object.values(src));
   const records = new Map();
   const rowsOf = new Map();
@@ -220,7 +235,7 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
     if (rec.spec_unit !== undefined) {
       const u = normUnit(rec.spec_unit);
       rec.spec_unit = u;
-      if (u && !KNOWN_UNITS.includes(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
+      if (u && !unitSet.has(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
     }
     rec.annotation = mapping.annotation_raw ? normAnnotation(rec.annotation_raw) : null;
     rec.source_row = r.rowNo;
@@ -258,6 +273,7 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
     disabled_rule_fields: disabledRules,
     missing_values: Object.fromEntries([...mapped].filter((f) => f !== 'drug_code').map((f) => [f, [...records.values()].filter((x) => x[f] === null || x[f] === undefined).length])),
     base_date: base,
+    known_units: units, unit_source: unitFrom,
   };
   return { records, check, headers, mapping: { ...mapping }, lookups: lk, conflictCodes, sheet: sheet || null, headerRow };
 }

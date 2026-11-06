@@ -152,10 +152,10 @@ function mappingForm(env) {
       st.priceFile = { name: f.name, bytes, table: openTable(f.name, bytes) };
       st.priceFile.headers = readHeaders(st.priceFile.table, st.priceFile.table.sheets[0], 1);
     })), st.priceFile ? h('span', { text: `${st.priceFile.name}：欄位 ${st.priceFile.headers.length} 個；預設 DRUG_CODE／PAY_S_DATE／PAY_E_DATE（含）／PAY_PRICE` }) : null) : null,
-    preset.lookups ? h('div', { class: 'filters' }, fileInput('代碼檔（DWM_DRUG_RCODE）', (f) => guard(async () => {
+    h('div', { class: 'filters' }, fileInput(preset.lookups ? '代碼檔（DWM_DRUG_RCODE，必要）' : '代碼檔（DWM_DRUG_RCODE，選用：提供規格單位清單）', (f) => guard(async () => {
       const bytes = new Uint8Array(await f.arrayBuffer());
       st.rcodeFile = { name: f.name, bytes };
-    })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : null) : null,
+    })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : h('span', { class: 'note', text: '未提供時，已知規格單位用內建清單（14種）；提供時取 type 2 規格單位代碼之英文名。' })),
     h('div', { class: 'toolbar' }, btn('試匯入（不改目前主檔）', () => guard(async () => {
       const mapping = {};
       for (const [k, s] of Object.entries(sel)) if (s.value) mapping[k] = s.value;
@@ -165,8 +165,8 @@ function mappingForm(env) {
       if (!iso) { await alertBox('請填資料基準日', '主檔啟用須有資料基準日（例：2026-11-01）。'); return; }
       const prog = (label) => async (n) => { st.progressEl.textContent = `${label}：已處理 ${n.toLocaleString()} 列…`; await nextTick(); };
       let rcode = null; let price = null;
-      if (preset.lookups) {
-        if (!st.rcodeFile) { await alertBox('缺代碼檔', '此預設映射需 DWM_DRUG_RCODE 代碼檔。'); return; }
+      if (preset.lookups && !st.rcodeFile) { await alertBox('缺代碼檔', '此預設映射需 DWM_DRUG_RCODE 代碼檔。'); return; }
+      if (st.rcodeFile) {
         const t = openTable(st.rcodeFile.name, st.rcodeFile.bytes);
         rcode = await M.loadRcode(t, { sheet: t.sheets[0], tick: prog('讀取代碼檔') });
       }
@@ -198,6 +198,7 @@ function stagedPanel(env, act) {
       ['資料列', String(c.total_rows)], ['代碼數', String(c.codes)], ['資料基準日', c.base_date || '未填'],
       ['代碼錯誤（阻止啟用）', String(c.code_error_count)], ['同代碼內容矛盾（阻止啟用）', String(c.conflict_count)],
       ['完全相同重複（確認後合併）', String(c.identical_duplicate_count)], ['警告', String(c.warning_count)],
+      ['已知規格單位來源', `${c.unit_source}（${c.known_units.length} 種）`],
       ['未知規格單位（規則判定待確認）', Object.entries(c.unknown_units).map(([u, n]) => `${u}（${n}）`).join('、') || '無'],
       ['代碼轉換找不到', Object.entries(c.unknown_lookup_count).map(([k, n]) => `${M.FIELD_LABEL[k]} ${n}`).join('、') || '無'],
       ['未映射欄位', c.unmapped_fields.map((k) => M.FIELD_LABEL[k]).join('、') || '無'],
@@ -227,7 +228,7 @@ async function doActivate(env) {
   if (!v) return;
   const sources = [{ role: '主檔', name: st.file.name, bytes: st.file.bytes, mime: st.file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }];
   if (st.usePriceLong && st.priceFile) sources.push({ role: '價格長表', name: st.priceFile.name, bytes: st.priceFile.bytes });
-  if (st.rcodeFile && M.PRESETS.find((p) => p.key === (st.preset || 'monthly')).lookups) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
+  if (st.rcodeFile) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
   st.progressEl.textContent = '寫入來源檔與列資料…';
   const r = await M.activateMaster(env.s, st.staged, sources, { confirmMerge: merge.checked, note: note.value.trim() || null, opId });
   env.ui.master = { progress: `已啟用（成為未儲存變更，請按「儲存」）。版本 ${r.import_id.slice(0, 8)}。` };

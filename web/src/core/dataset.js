@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS = {
   keyword_lock_sec: 30,
   csv_header_notes: true,
   attachment_max_mb: 50,
+  large_scope_threshold: 500,
 };
 
 const SETTING_RULES = {
@@ -25,6 +26,7 @@ const SETTING_RULES = {
   keyword_lock_sec: { type: 'int', min: 5, max: 3600, label: '輸錯鎖定（秒）' },
   csv_header_notes: { type: 'bool', label: 'CSV加說明列' },
   attachment_max_mb: { type: 'int', min: 1, max: 500, label: '附件大小上限（MB）' },
+  large_scope_threshold: { type: 'int', min: 1, max: 100000, label: '範圍過大警示門檻（筆）' },
 };
 
 export function settingLabel(key) {

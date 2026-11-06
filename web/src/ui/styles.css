@@ -68,3 +68,16 @@ tr.clickable:hover td { background: var(--accent-weak); }
 .kv dd { margin: 0; }
 .pager { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 @media (max-width: 640px) { .form-row, .kv { grid-template-columns: 1fr; } }
+.rule-editor { margin: 8px 0; }
+.rule-group { border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 6px 10px; margin: 6px 0; background: var(--panel); }
+.rule-not { border-left-color: var(--pink-deep); background: var(--pink); }
+.rule-manual { border-left-color: var(--warn, #6b5413); }
+.rule-leaf { border: 1px dashed var(--line); padding: 4px 8px; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.rule-leaf select, .rule-leaf input, .rule-leaf textarea, .rule-group select { font: inherit; border: 1px solid var(--line); }
+.rule-bad { background: var(--pink); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.chip-x { padding: 0 4px; margin: 0 0 0 4px; border-width: 1px; }
+.pick-list { display: flex; flex-direction: column; max-height: 14em; overflow-y: auto; }
+.pick-item { text-align: left; border-width: 1px; margin: 1px 0; }
+.rule-desc pre, details pre { background: var(--bg); border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; font-size: 13px; }
+.warn-list { margin: 6px 0; }
