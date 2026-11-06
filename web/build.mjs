@@ -10,6 +10,7 @@ const SRC = resolve(here, 'src');
 const ENTRY = resolve(SRC, 'ui/main.js');
 
 const IMPORT_RE = /^import\s+\{([^}]*)\}\s+from\s+'(\.[^']+)';\s*$/gm;
+const IMPORT_NS_RE = /^import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+'(\.[^']+)';\s*$/gm;
 const EXPORT_RE = /^export\s+(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z_$][\w$]*)/gm;
 
 function modName(file) {
@@ -23,6 +24,7 @@ function visit(file, stack = []) {
   if (stack.includes(file)) throw new Error('循環引用：' + stack.concat(file).join(' -> '));
   const src = readFileSync(file, 'utf8');
   for (const m of src.matchAll(IMPORT_RE)) visit(resolve(dirname(file), m[2]), stack.concat(file));
+  for (const m of src.matchAll(IMPORT_NS_RE)) visit(resolve(dirname(file), m[2]), stack.concat(file));
   seen.add(file);
   order.push(file);
 }
@@ -30,7 +32,7 @@ visit(ENTRY);
 
 function transform(file) {
   let src = readFileSync(file, 'utf8');
-  if (/^\s*import\s/m.test(src.replace(IMPORT_RE, ''))) throw new Error('不支援的import語法：' + file);
+  if (/^\s*import\s/m.test(src.replace(IMPORT_RE, '').replace(IMPORT_NS_RE, ''))) throw new Error('不支援的import語法：' + file);
   if (/^export\s+(default|\{|\*)/m.test(src)) throw new Error('不支援的export語法：' + file);
   const exportsList = [...src.matchAll(EXPORT_RE)].map((m) => m[1]);
   src = src.replace(IMPORT_RE, (all, names, from) => {
@@ -38,6 +40,7 @@ function transform(file) {
     const parts = names.split(',').map((x) => x.trim()).filter(Boolean).map((x) => x.replace(/\s+as\s+/, ': '));
     return `const { ${parts.join(', ')} } = ${target};`;
   });
+  src = src.replace(IMPORT_NS_RE, (all, name, from) => `const ${name} = ${modName(resolve(dirname(file), from))};`);
   src = src.replace(/^export\s+/gm, '');
   return `// ---- ${relative(SRC, file)} ----\nconst ${modName(file)} = (function () {\n${src}\nreturn { ${exportsList.join(', ')} };\n})();\n`;
 }

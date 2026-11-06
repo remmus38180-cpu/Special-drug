@@ -47,3 +47,24 @@ dialog.dlg h2 { font-size: 17px; margin: 0 0 8px; border-bottom: 2px solid var(-
   .toolbar, .tabs, button { display: none; }
   .statusbar { position: static; }
 }
+.form { display: grid; gap: 6px; }
+.form-row { display: grid; grid-template-columns: 9em 1fr; gap: 8px; align-items: start; }
+.form-label { padding-top: 3px; }
+.form-input textarea, .form-input select { font: inherit; border: 1px solid var(--line); max-width: 100%; }
+.checks { display: flex; flex-direction: column; gap: 2px; max-height: 14em; overflow-y: auto; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 6px 0; }
+.filters select, .filters input { font: inherit; border: 1px solid var(--line); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--accent-weak); }
+.badge { display: inline-block; border: 1px solid var(--line); padding: 0 6px; margin-right: 6px; font-size: 13px; }
+.badge-expert { background: var(--pink); }
+.badge-joint { background: var(--accent); }
+.badge-old { text-decoration: line-through; background: var(--bg); }
+.timeline { border-left: 4px solid var(--accent); padding-left: 12px; margin: 8px 0; }
+.tl-item { border: 1px solid var(--line); padding: 8px 12px; margin: 8px 0; background: var(--panel); }
+.tl-item h4 { margin: 0 0 4px; font-size: 15px; }
+.kv { display: grid; grid-template-columns: 9em 1fr; gap: 2px 12px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.pager { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+@media (max-width: 640px) { .form-row, .kv { grid-template-columns: 1fr; } }
