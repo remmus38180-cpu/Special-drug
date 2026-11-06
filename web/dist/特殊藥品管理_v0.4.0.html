@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
-<meta name="build-date" content="2026-10-25">
-<meta name="commit" content="1c59c8d">
+<meta name="build-date" content="2026-11-06">
+<meta name="commit" content="bbb6a85">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -58,6 +58,27 @@ dialog.dlg h2 { font-size: 17px; margin: 0 0 8px; border-bottom: 2px solid var(-
   .toolbar, .tabs, button { display: none; }
   .statusbar { position: static; }
 }
+.form { display: grid; gap: 6px; }
+.form-row { display: grid; grid-template-columns: 9em 1fr; gap: 8px; align-items: start; }
+.form-label { padding-top: 3px; }
+.form-input textarea, .form-input select { font: inherit; border: 1px solid var(--line); max-width: 100%; }
+.checks { display: flex; flex-direction: column; gap: 2px; max-height: 14em; overflow-y: auto; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 6px 0; }
+.filters select, .filters input { font: inherit; border: 1px solid var(--line); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--accent-weak); }
+.badge { display: inline-block; border: 1px solid var(--line); padding: 0 6px; margin-right: 6px; font-size: 13px; }
+.badge-expert { background: var(--pink); }
+.badge-joint { background: var(--accent); }
+.badge-old { text-decoration: line-through; background: var(--bg); }
+.timeline { border-left: 4px solid var(--accent); padding-left: 12px; margin: 8px 0; }
+.tl-item { border: 1px solid var(--line); padding: 8px 12px; margin: 8px 0; background: var(--panel); }
+.tl-item h4 { margin: 0 0 4px; font-size: 15px; }
+.kv { display: grid; grid-template-columns: 9em 1fr; gap: 2px 12px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.pager { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+@media (max-width: 640px) { .form-row, .kv { grid-template-columns: 1fr; } }
 
 </style>
 </head>
@@ -414,8 +435,8 @@ const __m_core_version_js = (function () {
 // 程式版本與資料結構版本（第11.5節）。建置腳本替換 __BUILD_DATE__、__COMMIT__。
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
-const BUILD_DATE = "2026-10-25";
-const BUILD_COMMIT = "1c59c8d";
+const BUILD_DATE = "2026-11-06";
+const BUILD_COMMIT = "bbb6a85";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -2730,6 +2751,757 @@ const localSessions = {
 return { idbStore, browserLocks, localSessions };
 })();
 
+// ---- ui/forms.js ----
+const __m_ui_forms_js = (function () {
+// 表單對話框：欄位定義→輸入元件；送出前由呼叫端驗證（業務模組會再驗一次）。
+const { h, dialog } = __m_ui_dom_js;
+// fields：[{key, label, type:'text'|'textarea'|'date'|'select'|'checks'|'note', options:[[value,label]], value, required, hint}]
+async function formDialog(title, fields, { okLabel = '確定', validate, intro } = {}) {
+  const inputs = {};
+  const msg = h('p', { class: 'warn-text', role: 'alert' });
+  const rows = fields.map((f) => {
+    if (f.type === 'note') return h('p', { class: 'note', text: f.label });
+    let el;
+    const v = f.value === null || f.value === undefined ? '' : f.value;
+    if (f.type === 'textarea') {
+      el = h('textarea', { rows: f.rows || 3, cols: 48 });
+      el.value = String(v);
+    } else if (f.type === 'select') {
+      el = h('select', null, (f.options || []).map(([val, lab]) => h('option', { value: val, text: lab, selected: String(val) === String(v) })));
+    } else if (f.type === 'checks') {
+      const set = new Set(v || []);
+      el = h('div', { class: 'checks' }, (f.options || []).map(([val, lab]) => h('label', { class: 'check' },
+        h('input', { type: 'checkbox', value: val, checked: set.has(val) }), ' ', lab)));
+    } else {
+      el = h('input', { type: 'text', size: f.size || 40, placeholder: f.type === 'date' ? 'YYYY-MM-DD 或 115/03/02' : (f.placeholder || '') });
+      el.value = String(v);
+    }
+    inputs[f.key] = { el, f };
+    return h('div', { class: 'form-row' },
+      h('label', { class: 'form-label' }, f.label + (f.required ? '＊' : '')), h('div', { class: 'form-input' }, el,
+        f.hint ? h('div', { class: 'note', text: f.hint }) : null));
+  });
+  const read = () => {
+    const out = {};
+    for (const [k, { el, f }] of Object.entries(inputs)) {
+      if (f.type === 'checks') out[k] = [...el.querySelectorAll('input:checked')].map((x) => x.value);
+      else out[k] = el.value.trim() === '' ? null : el.value.trim();
+    }
+    return out;
+  };
+  const r = await dialog(title, [intro ? h('p', { text: intro }) : null, h('div', { class: 'form' }, rows), msg], [
+    { label: '取消', value: null },
+    { label: okLabel, value: 'ok', primary: true, validate: () => {
+      const vals = read();
+      for (const { f } of Object.values(inputs)) {
+        if (f.required && (vals[f.key] === null || (Array.isArray(vals[f.key]) && !vals[f.key].length))) { msg.textContent = `請填「${f.label}」`; return false; }
+      }
+      const err = validate ? validate(vals) : null;
+      if (err) { msg.textContent = err; return false; }
+      return true;
+    } },
+  ]);
+  return r ? read() : null;
+}
+
+function opts(list) {
+  return list.map((x) => [x, x]);
+}
+
+return { formDialog, opts };
+})();
+
+// ---- core/cases.js ----
+const __m_core_cases_js = (function () {
+// 基本收案、歷次會議、議案、決議及逐品項結果（第9.1節、P0）。
+// 案件與認定分開；未通過案件也完整保存。專家建議與會議決議分開標示，不相互覆蓋（B12–B15）。
+// 函式皆於 session.run() 之資料副本上執行：fn(data, ctx)。
+const { SpecError } = __m_core_errors_js;
+const { E, insert, update, setDedicated, find, must, list } = __m_core_model_js;
+const { parseDate, normalizeCode } = __m_core_values_js;
+const APPROVING = ['同意', '附條件同意'];
+const CASE_EDITABLE = ['subject', 'applicant', 'request_item', 'recv_date', 'recv_doc_no', 'unit', 'handler', 'status', 'completeness', 'pending_fields', 'notes', 'source_ref'];
+const PENDING_LABELS = { recv_date: '收文日', recv_doc_no: '文號', applicant: '申請廠商' };
+
+function txt(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+// 日期欄：空白→null；無法解析→錯誤（未知請留空並標示待確認）
+function dateField(v, label) {
+  const s = txt(v);
+  if (!s) return null;
+  const d = parseDate(s);
+  if (!d) throw new SpecError('BAD_DATE', `${label}「${s}」無法解析；未知請留空並標示待確認`);
+  return d;
+}
+
+function taipeiYear(iso) {
+  return new Date(Date.parse(iso) + 8 * 3600 * 1000).getUTCFullYear();
+}
+
+function nextCaseNo(data, ctx, prefix = 'SD') {
+  const y = taipeiYear(ctx.now);
+  const used = new Set(list(data, 'case_record').map((c) => c.case_no));
+  let n = list(data, 'case_record').filter((c) => c.case_no.startsWith(`${prefix}${y}-`)).length;
+  for (;;) {
+    n += 1;
+    const no = `${prefix}${y}-${String(n).padStart(4, '0')}`;
+    if (!used.has(no)) return no;
+  }
+}
+
+function missingFields(v) {
+  return Object.keys(PENDING_LABELS).filter((k) => !v[k]);
+}
+
+function createCase(data, ctx, input) {
+  const subject = txt(input.subject);
+  if (!subject) throw new SpecError('REQUIRED', '請輸入主旨');
+  if (input.prior_case_id) must(data, 'case_record', input.prior_case_id);
+  const v = {
+    case_no: txt(input.case_no) || nextCaseNo(data, ctx),
+    subject,
+    applicant: txt(input.applicant),
+    request_item: txt(input.request_item),
+    recv_date: dateField(input.recv_date, '收文日'),
+    recv_doc_no: txt(input.recv_doc_no),
+    unit: txt(input.unit),
+    handler: txt(input.handler),
+    prior_case_id: input.prior_case_id || null,
+    source_ref: txt(input.source_ref),
+    notes: txt(input.notes),
+  };
+  if (input.status) {
+    if (input.status === '已結案' || input.status === '撤回') throw new SpecError('BAD_VALUE', '結案或撤回請使用「結案」功能並記錄原因與依據');
+    v.status = input.status;
+  }
+  const missing = missingFields(v);
+  v.completeness = input.completeness || (missing.length ? '待確認' : '完整');
+  v.pending_fields = txt(input.pending_fields) || (missing.length ? missing.join(',') : null);
+  const rec = insert(data, ctx, 'case_record', v);
+  for (const d of input.drugs || []) addCaseDrug(data, ctx, rec.id, typeof d === 'string' ? { drug_code: d } : d);
+  return rec;
+}
+
+function updateCase(data, ctx, caseId, changes, opts = {}) {
+  const bad = Object.keys(changes).filter((k) => !CASE_EDITABLE.includes(k));
+  if (bad.length) throw new SpecError('FIELD_NOT_ALLOWED', `案件不可直接修改：${bad.join('、')}`);
+  const c = { ...changes };
+  if (c.status === '已結案' || c.status === '撤回') throw new SpecError('BAD_VALUE', '結案或撤回請使用「結案」功能並記錄原因與依據');
+  const cur = must(data, 'case_record', caseId);
+  if (cur.status === '已結案' || cur.status === '撤回') {
+    if (c.status !== undefined) throw new SpecError('CASE_CLOSED', '案件已結案／撤回；再提或重新開案請建立新案並連結前案');
+  }
+  if ('recv_date' in c) c.recv_date = dateField(c.recv_date, '收文日');
+  for (const k of ['subject', 'applicant', 'request_item', 'recv_doc_no', 'unit', 'handler', 'pending_fields', 'notes', 'source_ref']) {
+    if (k in c) c[k] = txt(c[k]);
+  }
+  return update(data, ctx, 'case_record', caseId, c, opts);
+}
+
+function addCaseDrug(data, ctx, caseId, { drug_code, drug_name_text, role, note }) {
+  must(data, 'case_record', caseId);
+  const { code, error } = normalizeCode(drug_code);
+  if (error) throw new SpecError('BAD_CODE', `藥品代碼錯誤：${error}`);
+  if (list(data, 'case_drug').some((r) => r.case_id === caseId && r.drug_code === code)) {
+    throw new SpecError('DUPLICATE', `案件已有品項 ${code}`);
+  }
+  return insert(data, ctx, 'case_drug', { case_id: caseId, drug_code: code, drug_name_text: txt(drug_name_text), role: txt(role) || '申請品項', note: txt(note) });
+}
+
+function findMeeting(data, { meeting_type, name, meeting_date }) {
+  return list(data, 'meeting').find((m) => m.meeting_type === meeting_type && m.name === txt(name) && (m.meeting_date || null) === (meeting_date || null)) || null;
+}
+
+// 同類型、同名、同日之會議已存在時拒絕，避免每案重複登打（同會議資料共用）
+function createMeeting(data, ctx, { meeting_type, name, meeting_date, session_no, notes }) {
+  if (!E.MEETING_TYPE.includes(meeting_type)) throw new SpecError('BAD_VALUE', '會議類型須為：' + E.MEETING_TYPE.join('／'));
+  const n = txt(name);
+  if (!n) throw new SpecError('REQUIRED', '請輸入會議正式名稱');
+  const date = dateField(meeting_date, '會議日期');
+  const dup = findMeeting(data, { meeting_type, name: n, meeting_date: date });
+  if (dup) throw new SpecError('DUPLICATE', `已有同一會議（${dup.name}${dup.meeting_date ? '，' + dup.meeting_date : ''}），請直接選用`, { id: dup.id });
+  return insert(data, ctx, 'meeting', { meeting_type, name: n, meeting_date: date, session_no: txt(session_no), notes: txt(notes) });
+}
+
+function updateMeeting(data, ctx, id, changes, opts = {}) {
+  const allowed = ['name', 'meeting_date', 'session_no', 'notes'];
+  const bad = Object.keys(changes).filter((k) => !allowed.includes(k));
+  if (bad.length) throw new SpecError('FIELD_NOT_ALLOWED', `會議不可直接修改：${bad.join('、')}`);
+  const c = { ...changes };
+  if ('meeting_date' in c) c.meeting_date = dateField(c.meeting_date, '會議日期');
+  if ('name' in c) { c.name = txt(c.name); if (!c.name) throw new SpecError('REQUIRED', '請輸入會議正式名稱'); }
+  return update(data, ctx, 'meeting', id, c, opts);
+}
+
+// 同案重提新增議案紀錄，不覆蓋前次；以明確關聯連結案件
+function addAgenda(data, ctx, { meeting_id, case_id, agenda_no, subject, proposal, discussion, original_text }) {
+  must(data, 'meeting', meeting_id);
+  must(data, 'case_record', case_id);
+  return insert(data, ctx, 'meeting_agenda', {
+    meeting_id, case_id, agenda_no: txt(agenda_no), subject: txt(subject), proposal: txt(proposal),
+    discussion: txt(discussion), original_text: txt(original_text),
+  });
+}
+
+function updateAgenda(data, ctx, id, changes, opts = {}) {
+  const allowed = ['agenda_no', 'subject', 'proposal', 'discussion', 'original_text'];
+  const bad = Object.keys(changes).filter((k) => !allowed.includes(k));
+  if (bad.length) throw new SpecError('FIELD_NOT_ALLOWED', `議案不可直接修改：${bad.join('、')}`);
+  return update(data, ctx, 'meeting_agenda', id, changes, opts);
+}
+
+function agendaCaseId(data, decisionId) {
+  const dec = must(data, 'decision', decisionId);
+  return must(data, 'meeting_agenda', dec.agenda_id).case_id;
+}
+
+// drugResults：{case_drug_id: 結果 或 {result, conditions, note}}；未列入者不推定
+function addDecision(data, ctx, input) {
+  const { agenda_id, nature, result } = input;
+  must(data, 'meeting_agenda', agenda_id);
+  if (!E.NATURE.includes(nature)) throw new SpecError('BAD_VALUE', '結果性質須為「專家建議」或「會議決議」');
+  if (!E.RESULT.includes(result)) throw new SpecError('BAD_VALUE', '結果不正確');
+  if (result === '其他' && !txt(input.result_text)) throw new SpecError('REQUIRED', '結果為「其他」時須填結果原文說明');
+  if (input.supersedes_id) {
+    if (!txt(input.correction_reason)) throw new SpecError('REQUIRED', '更正或取代既有決議須填寫原因');
+    const old = must(data, 'decision', input.supersedes_id);
+    if (old.agenda_id !== agenda_id) throw new SpecError('BAD_REF', '更正之決議須屬同一議案');
+    if (list(data, 'decision').some((d) => d.supersedes_id === old.id)) throw new SpecError('DUPLICATE', '此決議已被更正，請更正最新一筆');
+  }
+  const dec = insert(data, ctx, 'decision', {
+    agenda_id, nature, result, result_text: txt(input.result_text), conditions: txt(input.conditions),
+    approval_doc_no: txt(input.approval_doc_no), approval_date: dateField(input.approval_date, '核定日期'),
+    supersedes_id: input.supersedes_id || null, correction_reason: txt(input.correction_reason),
+  }, { action: input.supersedes_id ? '更正決議' : '新增' });
+  for (const [cdId, val] of Object.entries(input.drugResults || {})) {
+    const v = typeof val === 'string' ? { result: val } : val;
+    setDecisionDrug(data, ctx, dec.id, cdId, v);
+  }
+  return dec;
+}
+
+// 逐品項結果；同決議同品項再登錄即修改（Q10暫採：修改留稽核前後差異）
+function setDecisionDrug(data, ctx, decisionId, caseDrugId, { result, conditions, note }, opts = {}) {
+  if (!E.RESULT.includes(result)) throw new SpecError('BAD_VALUE', '品項結果不正確');
+  if (result === '其他' && !txt(note) && !txt(conditions)) throw new SpecError('REQUIRED', '品項結果為「其他」時須說明');
+  const cd = must(data, 'case_drug', caseDrugId);
+  if (agendaCaseId(data, decisionId) !== cd.case_id) throw new SpecError('BAD_REF', '品項不屬於此議案的案件，不能串接');
+  const exist = list(data, 'decision_drug').find((r) => r.decision_id === decisionId && r.case_drug_id === caseDrugId);
+  const note2 = txt(note) || (result === '其他' ? txt(conditions) : null);
+  if (exist) return update(data, ctx, 'decision_drug', exist.id, { result, conditions: txt(conditions), note: note2 }, opts);
+  return insert(data, ctx, 'decision_drug', { decision_id: decisionId, case_drug_id: caseDrugId, result, conditions: txt(conditions), note: note2 });
+}
+
+// 結果摘要：須連結形成摘要的決議，由承辦確認；不以最後一次會議日期自動認定
+function setCaseSummary(data, ctx, caseId, { summary, decisionIds = [], note, reason }) {
+  const c = must(data, 'case_record', caseId);
+  if (!E.SUMMARY.includes(summary)) throw new SpecError('BAD_VALUE', '結果摘要不正確');
+  if (summary !== '尚無結論' && !decisionIds.length) throw new SpecError('REQUIRED', '結果摘要須連結至少一項會議決議或專家建議作為依據');
+  if (summary === '其他' && !txt(note)) throw new SpecError('REQUIRED', '摘要為「其他」時須說明');
+  for (const id of decisionIds) {
+    if (agendaCaseId(data, id) !== caseId) throw new SpecError('BAD_REF', '所選決議不屬於此案件');
+  }
+  return setDedicated(data, ctx, 'case_record', c.id, {
+    result_summary: summary, result_decision_ids: decisionIds.length ? [...decisionIds] : null, result_summary_note: txt(note),
+    result_confirmed_by: ctx.actor, result_confirmed_at: ctx.now,
+  }, { action: '確認結果摘要', reason, fields: ['result_summary', 'result_decision_ids', 'result_summary_note', 'result_confirmed_by', 'result_confirmed_at'] });
+}
+
+function closeCase(data, ctx, caseId, { status, reason, basis }) {
+  const c = must(data, 'case_record', caseId);
+  if (status !== '已結案' && status !== '撤回') throw new SpecError('BAD_VALUE', '結案狀態須為「已結案」或「撤回」');
+  if (!txt(reason) || !txt(basis)) throw new SpecError('REQUIRED', '結案須記錄原因與依據');
+  if (c.status === '已結案' || c.status === '撤回') throw new SpecError('CASE_CLOSED', '案件已結案／撤回');
+  return setDedicated(data, ctx, 'case_record', caseId, { status, close_reason: txt(reason), close_basis: txt(basis) },
+    { action: status === '撤回' ? '撤回案件' : '結案', reason: txt(reason), fields: ['status', 'close_reason', 'close_basis'] });
+}
+
+// 再提或重新開案：新建案件並保留與前案關聯；品項沿用前案（可另增減）
+function reopenAsNew(data, ctx, priorCaseId, input = {}) {
+  const prior = must(data, 'case_record', priorCaseId);
+  const drugs = input.drugs || list(data, 'case_drug').filter((d) => d.case_id === prior.id)
+    .map((d) => ({ drug_code: d.drug_code, drug_name_text: d.drug_name_text, role: d.role }));
+  return createCase(data, ctx, {
+    subject: prior.subject, applicant: prior.applicant, request_item: prior.request_item, unit: prior.unit, handler: prior.handler,
+    ...input, drugs, prior_case_id: prior.id,
+  });
+}
+
+// ---------- 查詢（唯讀） ----------
+
+function meetingOf(data, agenda) {
+  return find(data, 'meeting', agenda.meeting_id) || {};
+}
+
+// 依序列出各次會議、議案、決議及逐品項結果；日期未知者排最後
+function caseTimeline(data, caseId) {
+  const agendas = list(data, 'meeting_agenda').filter((a) => a.case_id === caseId).map((a) => {
+    const m = meetingOf(data, a);
+    const decisions = list(data, 'decision').filter((d) => d.agenda_id === a.id)
+      .sort((x, y) => (x.created_at < y.created_at ? -1 : x.created_at > y.created_at ? 1 : 0))
+      .map((d) => ({
+        ...d,
+        superseded: list(data, 'decision').some((z) => z.supersedes_id === d.id),
+        drugs: list(data, 'decision_drug').filter((r) => r.decision_id === d.id).map((r) => ({
+          ...r, drug_code: (find(data, 'case_drug', r.case_drug_id) || {}).drug_code,
+        })).sort((p, q) => (p.drug_code < q.drug_code ? -1 : 1)),
+      }));
+    return { ...a, meeting_type: m.meeting_type, meeting_name: m.name, meeting_date: m.meeting_date || null, session_no: m.session_no, decisions };
+  });
+  agendas.sort((a, b) => {
+    if (!a.meeting_date !== !b.meeting_date) return a.meeting_date ? -1 : 1;
+    if (a.meeting_date !== b.meeting_date) return a.meeting_date < b.meeting_date ? -1 : 1;
+    return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0;
+  });
+  return agendas;
+}
+
+// 可接續認定／調高之依據：未被更正之「會議決議」中，該品項為同意或附條件同意者（專家建議不當最終通過）
+function drugFollowupBasis(data, caseId, drugCode) {
+  const out = [];
+  for (const a of caseTimeline(data, caseId)) {
+    for (const d of a.decisions) {
+      if (d.nature !== '會議決議' || d.superseded) continue;
+      for (const r of d.drugs) {
+        if (r.drug_code === drugCode && APPROVING.includes(r.result)) {
+          out.push({ decision_id: d.id, result: r.result, conditions: r.conditions, meeting_name: a.meeting_name, meeting_date: a.meeting_date });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function caseDrugs(data, caseId) {
+  return list(data, 'case_drug').filter((d) => d.case_id === caseId).sort((a, b) => (a.drug_code < b.drug_code ? -1 : 1));
+}
+
+function listCases(data, { keyword, status, summary, completeness } = {}) {
+  const kw = txt(keyword);
+  const drugsBy = new Map();
+  for (const d of list(data, 'case_drug')) {
+    if (!drugsBy.has(d.case_id)) drugsBy.set(d.case_id, []);
+    drugsBy.get(d.case_id).push(d.drug_code);
+  }
+  return list(data, 'case_record').filter((c) => {
+    if (status && c.status !== status) return false;
+    if (summary && c.result_summary !== summary) return false;
+    if (completeness && c.completeness !== completeness) return false;
+    if (kw) {
+      const hay = [c.case_no, c.subject, c.applicant, c.recv_doc_no, ...(drugsBy.get(c.id) || [])].filter(Boolean).join(' ');
+      if (!hay.includes(kw)) return false;
+    }
+    return true;
+  }).map((c) => ({ ...c, drugs: (drugsBy.get(c.id) || []).sort() })).sort((a, b) => {
+    if (!a.recv_date !== !b.recv_date) return a.recv_date ? -1 : 1;
+    if (a.recv_date !== b.recv_date) return a.recv_date < b.recv_date ? 1 : -1;
+    return a.case_no < b.case_no ? 1 : -1;
+  });
+}
+
+function listMeetings(data, { keyword } = {}) {
+  const kw = txt(keyword);
+  const counts = new Map();
+  for (const a of list(data, 'meeting_agenda')) counts.set(a.meeting_id, (counts.get(a.meeting_id) || 0) + 1);
+  return list(data, 'meeting').filter((m) => !kw || [m.name, m.session_no].filter(Boolean).join(' ').includes(kw))
+    .map((m) => ({ ...m, agenda_count: counts.get(m.id) || 0 }))
+    .sort((a, b) => {
+      if (!a.meeting_date !== !b.meeting_date) return a.meeting_date ? -1 : 1;
+      return a.meeting_date === b.meeting_date ? 0 : a.meeting_date < b.meeting_date ? 1 : -1;
+    });
+}
+
+function meetingAgendas(data, meetingId) {
+  return list(data, 'meeting_agenda').filter((a) => a.meeting_id === meetingId).map((a) => ({
+    ...a, case_no: (find(data, 'case_record', a.case_id) || {}).case_no, case_subject: (find(data, 'case_record', a.case_id) || {}).subject,
+  })).sort((a, b) => String(a.agenda_no || '').localeCompare(String(b.agenda_no || ''), 'zh-Hant', { numeric: true }));
+}
+
+return { APPROVING, dateField, nextCaseNo, createCase, updateCase, addCaseDrug, findMeeting, createMeeting, updateMeeting, addAgenda, updateAgenda, addDecision, setDecisionDrug, setCaseSummary, closeCase, reopenAsNew, caseTimeline, drugFollowupBasis, caseDrugs, listCases, listMeetings, meetingAgendas };
+})();
+
+// ---- ui/casesView.js ----
+const __m_ui_casesView_js = (function () {
+// 案件清單、案件詳情／會議時間序列、會議清單（第10節）。只呼叫業務模組函式改資料。
+const { h, table, dialog } = __m_ui_dom_js;
+const { formDialog, opts } = __m_ui_forms_js;
+const C = __m_core_cases_js;
+const { E, find } = __m_core_model_js;
+const { rocDisplay } = __m_core_values_js;
+const { newId } = __m_core_util_js;
+const PAGE = 100;
+const RESULT_OPTS = opts(E.RESULT);
+
+function dateText(iso) {
+  return iso ? `${iso}（${rocDisplay(iso)}）` : '（未知）';
+}
+
+function natureBadge(nature, superseded) {
+  return h('span', { class: 'badge ' + (superseded ? 'badge-old' : nature === '專家建議' ? 'badge-expert' : 'badge-joint'),
+    text: (superseded ? '已更正｜' : '') + nature });
+}
+
+function kv(pairs) {
+  return h('dl', { class: 'kv' }, pairs.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', null, v instanceof Node ? v : (v === null || v === undefined || v === '' ? '—' : String(v)))]));
+}
+
+function casesTab(env) {
+  const { s, ui } = env;
+  ui.cases = ui.cases || { filters: {}, page: 0, selected: null };
+  return ui.cases.selected ? caseDetail(env, ui.cases.selected) : caseList(env);
+}
+
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+// ---------- 案件清單 ----------
+function caseList(env) {
+  const { s, ui, btn, guard, render } = env;
+  const st = ui.cases;
+  const f = st.filters;
+  const kw = h('input', { type: 'text', size: 18, value: f.keyword || '', placeholder: '案號、主旨、廠商、文號、藥品代碼', 'aria-label': '關鍵字' });
+  const sel = (key, label, list) => h('label', null, label + ' ', h('select', { 'aria-label': label, on: { change: (e) => { f[key] = e.target.value || null; st.page = 0; render(); } } },
+    h('option', { value: '', text: '全部' }), list.map((x) => h('option', { value: x, text: x, selected: f[key] === x }))));
+  const rows = C.listCases(data(env), f);
+  const pageRows = rows.slice(st.page * PAGE, (st.page + 1) * PAGE);
+  const box = h('section', { class: 'panel' },
+    h('h2', { text: '案件清單' }),
+    h('div', { class: 'filters' },
+      h('label', null, '關鍵字 ', kw), btn('查詢', () => { f.keyword = kw.value.trim() || null; st.page = 0; render(); }),
+      sel('status', '處理狀態', E.CASE_STATUS), sel('summary', '結果摘要', E.SUMMARY), sel('completeness', '完整性', E.COMPLETENESS),
+      btn('清除條件', () => { st.filters = {}; st.page = 0; render(); })),
+    s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('新增案件', () => guard(() => newCase(env)), { primary: true })) : null,
+    h('p', { class: 'note', text: `共 ${rows.length} 筆；未通過、撤回、辦理中案件一併列出。點選列開啟詳情。` }));
+  const t = table(['案號', '收文日', '文號', '主旨', '申請廠商', '品項', '承辦', '處理狀態', '結果摘要', '完整性'], []);
+  const tbody = t.querySelector('tbody');
+  for (const c of pageRows) {
+    const tr = h('tr', { class: 'clickable', tabindex: '0', on: {
+      click: () => { st.selected = c.id; render(); },
+      keydown: (e) => { if (e.key === 'Enter') { st.selected = c.id; render(); } },
+    } }, [c.case_no, c.recv_date || '', c.recv_doc_no || '', c.subject, c.applicant || '', c.drugs.join('、'), c.handler || '', c.status, c.result_summary, c.completeness]
+      .map((x) => h('td', { text: x })));
+    tbody.appendChild(tr);
+  }
+  box.appendChild(t);
+  if (rows.length > PAGE) {
+    const pages = Math.ceil(rows.length / PAGE);
+    box.appendChild(h('div', { class: 'pager' },
+      btn('上一頁', () => { st.page -= 1; render(); }, { disabled: st.page === 0 }),
+      h('span', { text: `第 ${st.page + 1}／${pages} 頁` }),
+      btn('下一頁', () => { st.page += 1; render(); }, { disabled: st.page >= pages - 1 })));
+  }
+  return box;
+}
+
+function caseFields(c = {}) {
+  return [
+    { key: 'subject', label: '主旨', required: true, value: c.subject },
+    { key: 'applicant', label: '申請廠商', value: c.applicant },
+    { key: 'request_item', label: '申請事項', value: c.request_item },
+    { key: 'recv_date', label: '收文日', type: 'date', value: c.recv_date },
+    { key: 'recv_doc_no', label: '收文文號', value: c.recv_doc_no },
+    { key: 'unit', label: '承辦單位', type: 'select', options: [['', '（未填）'], ['核價', '核價'], ['調價', '調價'], ['其他', '其他']], value: c.unit || '' },
+    { key: 'handler', label: '承辦人員', value: c.handler },
+    { key: 'notes', label: '備註', type: 'textarea', value: c.notes },
+  ];
+}
+
+async function newCase(env) {
+  const v = await formDialog('新增案件', [
+    ...caseFields(),
+    { key: 'drugs', label: '品項（藥品代碼）', type: 'textarea', hint: '一行一個或以逗號、空白分隔；代碼原樣保存，不補零' },
+    { key: 'case_no', label: '案號', hint: '空白則自動編號（SD西元年-流水號）' },
+    { type: 'note', label: '歷史補登時，未知的收文日、文號、廠商請留空，系統標示「待確認」，不以會議日補填。' },
+  ], { okLabel: '建立' });
+  if (!v) return;
+  const drugs = (v.drugs || '').split(/[\s,，、]+/).map((x) => x.trim()).filter(Boolean);
+  const rec = await env.s.run((d, k) => C.createCase(d, k, { ...v, drugs }));
+  env.ui.cases.selected = rec.id;
+}
+
+// ---------- 案件詳情 ----------
+function caseDetail(env, caseId) {
+  const { s, ui, btn, guard, render } = env;
+  const d = data(env);
+  const c = find(d, 'case_record', caseId);
+  if (!c) { ui.cases.selected = null; return caseList(env); }
+  const editing = s.mode === 'edit';
+  const closed = c.status === '已結案' || c.status === '撤回';
+  const drugs = C.caseDrugs(d, c.id);
+  const prior = c.prior_case_id ? find(d, 'case_record', c.prior_case_id) : null;
+  const later = d.collections.case_record.filter((x) => x.prior_case_id === c.id);
+  const summaryDecs = (c.result_decision_ids || []).map((id) => find(d, 'decision', id)).filter(Boolean);
+
+  const info = h('section', { class: 'panel' },
+    h('div', { class: 'toolbar' }, btn('← 回案件清單', () => { ui.cases.selected = null; render(); })),
+    h('h2', { text: `案件 ${c.case_no}：${c.subject}` }),
+    c.completeness !== '完整' ? h('p', { class: 'warn-text', text: `資料完整性：${c.completeness}${c.pending_fields ? `（待補：${c.pending_fields}）` : ''}` }) : null,
+    kv([
+      ['收文日', dateText(c.recv_date)], ['收文文號', c.recv_doc_no], ['申請廠商', c.applicant], ['申請事項', c.request_item],
+      ['承辦', [c.unit, c.handler].filter(Boolean).join('／')], ['處理狀態', c.status],
+      ['結果摘要', `${c.result_summary}${c.result_summary_note ? `（${c.result_summary_note}）` : ''}`],
+      ['摘要依據', summaryDecs.length ? summaryDecs.map((x) => `${x.nature}：${x.result}`).join('；') : null],
+      ['摘要確認', c.result_confirmed_by ? `${c.result_confirmed_by}，${c.result_confirmed_at}` : null],
+      ['結案', closed ? `${c.status}：${c.close_reason}（依據：${c.close_basis}）` : null],
+      ['前案', prior ? h('a', { href: '#', text: `${prior.case_no} ${prior.subject}`, on: { click: (e) => { e.preventDefault(); ui.cases.selected = prior.id; render(); } } }) : null],
+      ['後續再提', later.length ? h('span', null, later.map((x) => h('a', { href: '#', text: `${x.case_no} `, on: { click: (e) => { e.preventDefault(); ui.cases.selected = x.id; render(); } } }))) : null],
+      ['來源', c.source_ref], ['備註', c.notes],
+      ['建立／更新', `${c.created_by}，${c.created_at}／${c.updated_by}，${c.updated_at}（第${c.row_version}版）`],
+    ]),
+    editing ? h('div', { class: 'toolbar' },
+      btn('修改基本資料', () => guard(() => editCase(env, c))),
+      btn('確認結果摘要', () => guard(() => confirmSummary(env, c))),
+      closed ? null : btn('結案／撤回', () => guard(() => closeCaseUI(env, c))),
+      closed ? btn('再提（開新案並連結前案）', () => guard(() => reopenUI(env, c))) : null) : null);
+
+  const drugBox = h('section', { class: 'panel' }, h('h3', { text: '申請品項' }),
+    table(['藥品代碼', '品名（原文）', '角色', '可接續之會議決議（同意／附條件同意）'], drugs.map((x) => {
+      const basis = C.drugFollowupBasis(d, c.id, x.drug_code);
+      return [x.drug_code, x.drug_name_text || '', x.role || '', basis.length ? basis.map((b) => `${b.meeting_name}：${b.result}`).join('；') : '無'];
+    })),
+    editing && !closed ? h('div', { class: 'toolbar' }, btn('新增品項', () => guard(() => addDrugUI(env, c)))) : null);
+
+  const tl = C.caseTimeline(d, c.id);
+  const tlBox = h('section', { class: 'panel' }, h('h3', { text: '會議時間序列' }),
+    h('p', { class: 'note', text: '專家建議與共同擬訂會議決議分別標示；同案重提為新議案，不覆蓋前次。未列入某次討論的品項不推定結果。' }),
+    tl.length ? null : h('p', { text: '尚無會議紀錄。' }),
+    h('div', { class: 'timeline' }, tl.map((a) => h('div', { class: 'tl-item' },
+      h('h4', { text: `${a.meeting_date ? `${a.meeting_date}（${rocDisplay(a.meeting_date)}）` : '日期未知'}｜${a.meeting_type}｜${a.meeting_name}${a.session_no ? `（${a.session_no}）` : ''}` }),
+      h('p', { text: `議案 ${a.agenda_no || '—'}：${a.subject || ''}` }),
+      a.proposal ? h('p', { class: 'note', text: '提案資料：' + a.proposal }) : null,
+      a.discussion ? h('p', { class: 'note', text: '討論摘要：' + a.discussion }) : null,
+      a.original_text ? h('p', { class: 'note', text: '原文紀錄：' + a.original_text }) : null,
+      a.decisions.map((dec) => h('div', { class: 'decision' },
+        h('p', null, natureBadge(dec.nature, dec.superseded), h('strong', { text: dec.result }),
+          dec.result_text ? '：' + dec.result_text : '', dec.conditions ? `（條件：${dec.conditions}）` : '',
+          dec.approval_doc_no ? `｜核定文號 ${dec.approval_doc_no}` : '', dec.approval_date ? `｜核定日 ${dec.approval_date}` : '',
+          dec.correction_reason ? `｜更正原因：${dec.correction_reason}` : ''),
+        dec.drugs.length ? table(['藥品代碼', '品項結果', '條件', '說明', ''], dec.drugs.map((r) => [r.drug_code, r.result, r.conditions || '', r.note || '',
+          editing && !dec.superseded ? btn('修改', () => guard(() => editDrugResult(env, dec, r))) : ''])) : h('p', { class: 'note', text: '未登錄逐品項結果。' }),
+        editing && !dec.superseded ? h('div', { class: 'toolbar' },
+          btn('補登品項結果', () => guard(() => addDrugResults(env, c, dec))),
+          btn('更正此決議', () => guard(() => correctDecision(env, c, a, dec)))) : null)),
+      editing ? h('div', { class: 'toolbar' }, btn('新增決議／建議', () => guard(() => newDecision(env, c, a)))) : null))),
+    editing ? h('div', { class: 'toolbar' }, btn('新增議案（選會議）', () => guard(() => newAgenda(env, c)), { primary: true })) : null);
+  return [info, drugBox, tlBox];
+}
+
+async function editCase(env, c) {
+  const fields = [...caseFields(c),
+    { key: 'status', label: '處理狀態', type: 'select', options: opts(E.CASE_STATUS.filter((x) => x !== '已結案' && x !== '撤回')), value: c.status },
+    { key: 'completeness', label: '完整性', type: 'select', options: opts(E.COMPLETENESS), value: c.completeness },
+    { key: 'pending_fields', label: '待補欄位', value: c.pending_fields },
+    { key: 'reason', label: '修改原因' }];
+  if (c.status === '已結案' || c.status === '撤回') fields.splice(fields.findIndex((x) => x.key === 'status'), 1);
+  const v = await formDialog('修改案件基本資料', fields);
+  if (!v) return;
+  const { reason, ...changes } = v;
+  if (!changes.unit) changes.unit = null;
+  await env.s.run((d, k) => C.updateCase(d, k, c.id, changes, { expectedVersion: c.row_version, reason }));
+}
+
+async function addDrugUI(env, c) {
+  const v = await formDialog('新增品項', [
+    { key: 'drug_code', label: '藥品代碼', required: true, hint: '原樣保存，不補零、不改O/0' },
+    { key: 'drug_name_text', label: '品名（原文）' }, { key: 'role', label: '角色', value: '申請品項' }, { key: 'note', label: '備註' }]);
+  if (!v) return;
+  await env.s.run((d, k) => C.addCaseDrug(d, k, c.id, v));
+}
+
+async function pickMeeting(env) {
+  const d = data(env);
+  const ms = C.listMeetings(d);
+  const v = await formDialog('選擇會議', [
+    { key: 'meeting_id', label: '既有會議', type: 'select', options: [['', '（新增會議）'], ...ms.map((m) => [m.id, `${m.meeting_date || '日期未知'}｜${m.meeting_type}｜${m.name}`])] },
+    { type: 'note', label: '同次會議處理多案時請選用既有會議，避免重複登打；選「新增會議」則下一步填寫會議資料。' },
+  ], { okLabel: '下一步' });
+  if (!v) return null;
+  if (v.meeting_id) return v.meeting_id;
+  return newMeetingUI(env);
+}
+
+async function newMeetingUI(env) {
+  const v = await formDialog('新增會議', [
+    { key: 'meeting_type', label: '會議類型', type: 'select', options: opts(E.MEETING_TYPE), required: true, hint: '二代健保實施前多為藥事小組，實施後為共同擬訂會議' },
+    { key: 'name', label: '正式名稱', required: true }, { key: 'meeting_date', label: '會議日期', type: 'date', hint: '只知年月者請留空並於備註記載，不補日' },
+    { key: 'session_no', label: '次別' }, { key: 'notes', label: '備註', type: 'textarea' }]);
+  if (!v) return null;
+  const m = await env.s.run((d, k) => C.createMeeting(d, k, v));
+  return m.id;
+}
+
+async function newAgenda(env, c) {
+  const mid = await pickMeeting(env);
+  if (!mid) return;
+  const v = await formDialog('新增議案', [
+    { key: 'agenda_no', label: '案次' }, { key: 'subject', label: '提案主旨', value: c.subject },
+    { key: 'proposal', label: '提案資料', type: 'textarea' }, { key: 'discussion', label: '討論摘要', type: 'textarea' },
+    { key: 'original_text', label: '原文紀錄', type: 'textarea' }]);
+  if (!v) return;
+  await env.s.run((d, k) => C.addAgenda(d, k, { ...v, meeting_id: mid, case_id: c.id }));
+}
+
+function drugResultFields(drugs, current = {}) {
+  return drugs.map((x) => ({ key: 'dr_' + x.id, label: `品項 ${x.drug_code}`, type: 'select', options: [['', '（未列入本次討論）'], ...RESULT_OPTS], value: current[x.id] || '' }));
+}
+
+function collectDrugResults(v, drugs) {
+  const out = {};
+  for (const x of drugs) if (v['dr_' + x.id]) out[x.id] = v['dr_' + x.id];
+  return out;
+}
+
+async function newDecision(env, c, a, base) {
+  const d = data(env);
+  const drugs = C.caseDrugs(d, c.id);
+  const meeting = find(d, 'meeting', a.meeting_id) || {};
+  const defNature = meeting.meeting_type === '專家' ? '專家建議' : '會議決議';
+  const fields = [
+    { key: 'nature', label: '結果性質', type: 'select', options: opts(E.NATURE), value: base ? base.nature : defNature, required: true },
+    { key: 'result', label: '結果', type: 'select', options: RESULT_OPTS, value: base ? base.result : '待確認', required: true },
+    { key: 'result_text', label: '結果原文', type: 'textarea', value: base && base.result_text, hint: '結果為「其他」時必填' },
+    { key: 'conditions', label: '附帶條件', type: 'textarea', value: base && base.conditions, hint: '附條件同意者，條件內容保存於此（B19：系統不另設達成檢核）' },
+    { key: 'approval_doc_no', label: '核定文號', value: base && base.approval_doc_no }, { key: 'approval_date', label: '核定日期', type: 'date', value: base && base.approval_date },
+    ...drugResultFields(drugs),
+  ];
+  if (base) fields.unshift({ key: 'correction_reason', label: '更正原因', required: true });
+  const v = await formDialog(base ? '更正決議（新增取代紀錄，原決議保留）' : '新增決議／建議', fields, {
+    validate: (x) => (x.result === '其他' && !x.result_text ? '結果為「其他」時須填結果原文' : null),
+  });
+  if (!v) return;
+  const drugResults = collectDrugResults(v, drugs);
+  await env.s.run((dd, k) => C.addDecision(dd, k, {
+    agenda_id: a.id, nature: v.nature, result: v.result, result_text: v.result_text, conditions: v.conditions,
+    approval_doc_no: v.approval_doc_no, approval_date: v.approval_date, drugResults,
+    supersedes_id: base ? base.id : null, correction_reason: base ? v.correction_reason : null,
+  }));
+}
+
+async function correctDecision(env, c, a, dec) {
+  await newDecision(env, c, a, dec);
+}
+
+async function addDrugResults(env, c, dec) {
+  const d = data(env);
+  const drugs = C.caseDrugs(d, c.id);
+  const cur = Object.fromEntries(dec.drugs.map((r) => [r.case_drug_id, r.result]));
+  const v = await formDialog('登錄逐品項結果', [...drugResultFields(drugs, cur), { key: 'reason', label: '修改原因', hint: '修改既有結果時請填' }]);
+  if (!v) return;
+  const res = collectDrugResults(v, drugs);
+  await env.s.run((dd, k) => {
+    for (const [cdId, result] of Object.entries(res)) {
+      if (cur[cdId] === result) continue;
+      C.setDecisionDrug(dd, k, dec.id, cdId, { result }, { reason: v.reason });
+    }
+  });
+}
+
+async function editDrugResult(env, dec, r) {
+  const v = await formDialog(`修改品項 ${r.drug_code} 結果`, [
+    { key: 'result', label: '結果', type: 'select', options: RESULT_OPTS, value: r.result, required: true },
+    { key: 'conditions', label: '條件', type: 'textarea', value: r.conditions }, { key: 'note', label: '說明', type: 'textarea', value: r.note },
+    { key: 'reason', label: '修改原因', required: true },
+    { type: 'note', label: 'Q10暫採：逐品項結果可修改，稽核保留修改前後內容。' }]);
+  if (!v) return;
+  await env.s.run((dd, k) => C.setDecisionDrug(dd, k, dec.id, r.case_drug_id, v, { expectedVersion: r.row_version, reason: v.reason }));
+}
+
+async function confirmSummary(env, c) {
+  const d = data(env);
+  const opId = newId();
+  const decs = C.caseTimeline(d, c.id).flatMap((a) => a.decisions.filter((x) => !x.superseded).map((x) => [x.id, `${a.meeting_date || '日期未知'}｜${a.meeting_name}｜${x.nature}：${x.result}`]));
+  const v = await formDialog('確認結果摘要', [
+    { key: 'summary', label: '結果摘要', type: 'select', options: opts(E.SUMMARY), value: c.result_summary, required: true },
+    { key: 'decisionIds', label: '形成摘要之決議', type: 'checks', options: decs, value: c.result_decision_ids || [] },
+    { key: 'note', label: '說明', type: 'textarea', value: c.result_summary_note, hint: '摘要為「其他」時必填' },
+    { type: 'note', label: '須連結形成摘要的會議決議或專家建議，由承辦確認；系統不以最後一次會議自動認定。專家建議同意不等於最終通過。' },
+  ], { okLabel: '下一步', validate: (x) => (x.summary !== '尚無結論' && !x.decisionIds.length ? '請勾選至少一項決議作為依據' : x.summary === '其他' && !x.note ? '摘要為「其他」時須說明' : null) });
+  if (!v) return;
+  const ok = await dialog('確認', [h('p', { text: `將案件 ${c.case_no} 結果摘要確認為「${v.summary}」，依據 ${v.decisionIds.length} 項決議，確認者 ${env.s.session.user}。` })],
+    [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
+  if (!ok) return;
+  await env.s.run((dd, k) => { C.setCaseSummary(dd, k, c.id, v); return { case_id: c.id }; }, { opId, kind: '確認結果摘要' });
+}
+
+async function closeCaseUI(env, c) {
+  const opId = newId();
+  const v = await formDialog('結案／撤回', [
+    { key: 'status', label: '狀態', type: 'select', options: [['已結案', '已結案'], ['撤回', '撤回']], required: true },
+    { key: 'reason', label: '原因', type: 'textarea', required: true }, { key: 'basis', label: '依據', type: 'textarea', required: true, hint: '例：會議紀錄、撤回函文號' },
+    { type: 'note', label: '結案不自動更動主檔註記；既有認定之取消或改類須另建有依據之事件（B15）。' }], { okLabel: '下一步' });
+  if (!v) return;
+  const ok = await dialog('確認', [h('p', { text: `案件 ${c.case_no} 將改為「${v.status}」。結案後再提須開新案並連結前案。` })],
+    [{ label: '取消', value: null }, { label: '確認', value: true, primary: true }]);
+  if (!ok) return;
+  await env.s.run((dd, k) => { C.closeCase(dd, k, c.id, v); return { case_id: c.id }; }, { opId, kind: '結案' });
+}
+
+async function reopenUI(env, c) {
+  const v = await formDialog('再提（開新案）', [
+    { key: 'subject', label: '主旨', value: c.subject, required: true }, { key: 'recv_date', label: '收文日', type: 'date' },
+    { key: 'recv_doc_no', label: '收文文號' }, { key: 'notes', label: '備註', type: 'textarea' }],
+  { intro: `新案將連結前案 ${c.case_no}，品項沿用前案。` });
+  if (!v) return;
+  const r = await env.s.run((d, k) => C.reopenAsNew(d, k, c.id, v));
+  env.ui.cases.selected = r.id;
+}
+
+// ---------- 會議清單 ----------
+function meetingsTab(env) {
+  const { s, ui, btn, guard, render } = env;
+  ui.meetings = ui.meetings || { keyword: null, selected: null };
+  const st = ui.meetings;
+  const d = data(env);
+  if (st.selected) {
+    const m = find(d, 'meeting', st.selected);
+    if (m) {
+      const ags = C.meetingAgendas(d, m.id);
+      return h('section', { class: 'panel' },
+        h('div', { class: 'toolbar' }, btn('← 回會議清單', () => { st.selected = null; render(); })),
+        h('h2', { text: `${m.meeting_type}｜${m.name}` }),
+        kv([['日期', dateText(m.meeting_date)], ['次別', m.session_no], ['備註', m.notes]]),
+        s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('修改會議資料', () => guard(async () => {
+          const v = await formDialog('修改會議', [{ key: 'name', label: '正式名稱', value: m.name, required: true }, { key: 'meeting_date', label: '會議日期', type: 'date', value: m.meeting_date },
+            { key: 'session_no', label: '次別', value: m.session_no }, { key: 'notes', label: '備註', type: 'textarea', value: m.notes }, { key: 'reason', label: '修改原因' }]);
+          if (!v) return;
+          const { reason, ...ch } = v;
+          await s.run((dd, k) => C.updateMeeting(dd, k, m.id, ch, { expectedVersion: m.row_version, reason }));
+        }))) : null,
+        h('h3', { text: `議案（${ags.length}）` }),
+        (() => {
+          const t = table(['案次', '案號', '案件主旨', '提案主旨', '決議'], []);
+          for (const a of ags) {
+            const decs = d.collections.decision.filter((x) => x.agenda_id === a.id).map((x) => `${x.nature}：${x.result}`).join('；');
+            t.querySelector('tbody').appendChild(h('tr', { class: 'clickable', on: { click: () => { ui.tab = 'cases'; ui.cases = ui.cases || { filters: {}, page: 0 }; ui.cases.selected = a.case_id; render(); } } },
+              [a.agenda_no || '', a.case_no, a.case_subject, a.subject || '', decs].map((x) => h('td', { text: x }))));
+          }
+          return t;
+        })());
+    }
+    st.selected = null;
+  }
+  const kw = h('input', { type: 'text', size: 18, value: st.keyword || '', 'aria-label': '會議關鍵字' });
+  const rows = C.listMeetings(d, { keyword: st.keyword });
+  const t = table(['日期', '類型', '正式名稱', '次別', '議案數'], []);
+  for (const m of rows) {
+    t.querySelector('tbody').appendChild(h('tr', { class: 'clickable', on: { click: () => { st.selected = m.id; render(); } } },
+      [m.meeting_date ? `${m.meeting_date}（${rocDisplay(m.meeting_date)}）` : '日期未知', m.meeting_type, m.name, m.session_no || '', m.agenda_count].map((x) => h('td', { text: x }))));
+  }
+  return h('section', { class: 'panel' }, h('h2', { text: '會議清單' }),
+    h('div', { class: 'filters' }, h('label', null, '關鍵字 ', kw), btn('查詢', () => { st.keyword = kw.value.trim() || null; render(); })),
+    s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('新增會議', () => guard(() => newMeetingUI(env)), { primary: true })) : null,
+    h('p', { class: 'note', text: `共 ${rows.length} 次會議。同次會議可連多案。` }), t);
+}
+
+
+return { casesTab, meetingsTab };
+})();
+
 // ---- ui/main.js ----
 const __m_ui_main_js = (function () {
 // 介面：啟動、狀態列、編輯牌操作、儲存歷程、設定、關於。只呼叫業務模組函式改資料。
@@ -2746,6 +3518,7 @@ const { taipeiDisplay, taipeiHM, taipeiCompact, parseIso, revLabel } = __m_core_
 const { settingLabel, DEFAULT_SETTINGS } = __m_core_dataset_js;
 const { MIN_KEYWORD_LENGTH } = __m_core_keyword_js;
 const { hasBusinessData } = __m_core_demo_js;
+const { casesTab, meetingsTab } = __m_ui_casesView_js;
 const PROFILE_KEY = 'specdrug.profile';
 // 設計建議（待使用者同意）：同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。預設關閉。
 const LOCAL_CLOSED_RELEASE = false;
@@ -3181,7 +3954,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -3365,7 +4138,8 @@ function render() {
     return;
   }
   root.appendChild(renderTabs());
-  const views = { home: renderHome, history: renderHistory, settings: renderSettings, about: renderAbout };
+  const env = { s, ui, btn, guard, render };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
