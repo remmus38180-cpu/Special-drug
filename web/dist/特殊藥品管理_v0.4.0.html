@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
-<meta name="build-date" content="2026-11-06">
-<meta name="commit" content="bbb6a85">
+<meta name="build-date" content="2026-11-07">
+<meta name="commit" content="ce8ad22">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -435,8 +435,8 @@ const __m_core_version_js = (function () {
 // 程式版本與資料結構版本（第11.5節）。建置腳本替換 __BUILD_DATE__、__COMMIT__。
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
-const BUILD_DATE = "2026-11-06";
-const BUILD_COMMIT = "bbb6a85";
+const BUILD_DATE = "2026-11-07";
+const BUILD_COMMIT = "ce8ad22";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -1869,6 +1869,1132 @@ function validateData(data) {
 return { E, PROTECTED, SCHEMA, actorText, list, find, must, insert, update, setConfirmStatus, setDedicated, opSeen, opRecord, validateData };
 })();
 
+// ---- core/inflate.js ----
+const __m_core_inflate_js = (function () {
+// DEFLATE 解壓（RFC 1951），自行實作，不依賴外部函式庫。
+// 以產生器分段輸出（每段約1MB），保留32KB回溯視窗；呼叫端可在段與段之間讓出執行緒、顯示進度。
+const { SpecError } = __m_core_errors_js;
+const LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+const LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+const CL_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const FAST = 10;
+const WINDOW = 32768;
+
+function bad(msg) {
+  return new SpecError('INFLATE', '壓縮資料損毀：' + msg);
+}
+
+// 霍夫曼表：counts／symbols 供慢速逐位元解碼；fast 為10位元查表（值＝symbol | len<<16，0＝走慢速）
+function buildHuffman(lengths, n) {
+  const counts = new Uint16Array(16);
+  for (let i = 0; i < n; i++) counts[lengths[i]]++;
+  counts[0] = 0;
+  let left = 1;
+  for (let len = 1; len < 16; len++) {
+    left = (left << 1) - counts[len];
+    if (left < 0) throw bad('霍夫曼碼超量');
+  }
+  const offs = new Uint16Array(16);
+  for (let len = 1; len < 15; len++) offs[len + 1] = offs[len] + counts[len];
+  const symbols = new Uint16Array(n);
+  for (let s = 0; s < n; s++) if (lengths[s]) symbols[offs[lengths[s]]++] = s;
+  const fast = new Int32Array(1 << FAST);
+  // 依正準碼建查表（位元反轉）
+  let code = 0;
+  const next = new Uint16Array(16);
+  for (let len = 1; len < 16; len++) { code = (code + counts[len - 1]) << 1; next[len] = code; }
+  for (let s = 0; s < n; s++) {
+    const len = lengths[s];
+    if (!len || len > FAST) continue;
+    let c = next[len]++;
+    let r = 0;
+    for (let i = 0; i < len; i++) { r = (r << 1) | (c & 1); c >>>= 1; }
+    for (let k = r; k < (1 << FAST); k += (1 << len)) fast[k] = s | (len << 16) | 0x40000000;
+  }
+  return { counts, symbols, fast };
+}
+
+const FIXED = (() => {
+  const l = new Uint8Array(288);
+  for (let i = 0; i < 144; i++) l[i] = 8;
+  for (let i = 144; i < 256; i++) l[i] = 9;
+  for (let i = 256; i < 280; i++) l[i] = 7;
+  for (let i = 280; i < 288; i++) l[i] = 8;
+  const d = new Uint8Array(30).fill(5);
+  return { lit: buildHuffman(l, 288), dist: buildHuffman(d, 30) };
+})();
+
+function* inflateRawChunks(src, chunkSize = 1 << 20) {
+  let pos = 0;
+  let bitbuf = 0;
+  let bitcnt = 0;
+  const cap = WINDOW + chunkSize;
+  let out = new Uint8Array(cap);
+  let op = 0;
+  let emitFrom = 0;
+  let overrun = 0;
+
+  const need = (n) => {
+    while (bitcnt < n) {
+      if (pos < src.length) bitbuf |= src[pos++] << bitcnt;
+      else if (++overrun > 4) throw bad('資料提前結束');
+      bitcnt += 8;
+    }
+  };
+  const bits = (n) => {
+    need(n);
+    const v = bitbuf & ((1 << n) - 1);
+    bitbuf >>>= n;
+    bitcnt -= n;
+    return v;
+  };
+  const decode = (h) => {
+    need(15);
+    const e = h.fast[bitbuf & ((1 << FAST) - 1)];
+    if (e) {
+      const len = (e >>> 16) & 0xff;
+      bitbuf >>>= len;
+      bitcnt -= len;
+      return e & 0xffff;
+    }
+    // 慢速：逐位元正準解碼
+    let code = 0; let first = 0; let index = 0;
+    for (let len = 1; len < 16; len++) {
+      code |= bitbuf & 1;
+      bitbuf >>>= 1;
+      bitcnt--;
+      const count = h.counts[len];
+      if (code - count < first) return h.symbols[index + (code - first)];
+      index += count;
+      first += count;
+      first <<= 1;
+      code <<= 1;
+    }
+    throw bad('無效霍夫曼碼');
+  };
+  // 輸出緩衝滿：送出新資料，保留最後32KB作回溯視窗
+  function* flushIfFull(force) {
+    if (!force && op < cap) return;
+    if (op > emitFrom) yield out.slice(emitFrom, op);
+    if (op > WINDOW) {
+      out.copyWithin(0, op - WINDOW, op);
+      op = WINDOW;
+    }
+    emitFrom = op;
+  }
+
+  let last = 0;
+  while (!last) {
+    last = bits(1);
+    const type = bits(2);
+    if (type === 0) {
+      // 對齊位元組：捨棄未滿一位元組之位元，並退回已預讀之整位元組
+      bitcnt -= bitcnt & 7;
+      pos -= (bitcnt >> 3) - Math.max(0, overrun);
+      bitbuf = 0; bitcnt = 0; overrun = 0;
+      if (pos + 4 > src.length) throw bad('stored區塊不完整');
+      const len = src[pos] | (src[pos + 1] << 8);
+      const nlen = src[pos + 2] | (src[pos + 3] << 8);
+      pos += 4;
+      if ((len ^ 0xffff) !== nlen) throw bad('stored區塊長度錯誤');
+      if (pos + len > src.length) throw bad('stored區塊超出資料');
+      let k = 0;
+      while (k < len) {
+        const n = Math.min(len - k, cap - op);
+        out.set(src.subarray(pos + k, pos + k + n), op);
+        op += n; k += n;
+        yield* flushIfFull(false);
+      }
+      pos += len;
+      continue;
+    }
+    let lit; let dist;
+    if (type === 1) {
+      lit = FIXED.lit; dist = FIXED.dist;
+    } else if (type === 2) {
+      const hlit = bits(5) + 257;
+      const hdist = bits(5) + 1;
+      const hclen = bits(4) + 4;
+      const cl = new Uint8Array(19);
+      for (let i = 0; i < hclen; i++) cl[CL_ORDER[i]] = bits(3);
+      const clh = buildHuffman(cl, 19);
+      const lens = new Uint8Array(hlit + hdist);
+      let i = 0;
+      while (i < hlit + hdist) {
+        const sym = decode(clh);
+        if (sym < 16) { lens[i++] = sym; continue; }
+        let rep = 0; let val = 0;
+        if (sym === 16) { if (!i) throw bad('重複碼無前值'); val = lens[i - 1]; rep = 3 + bits(2); }
+        else if (sym === 17) rep = 3 + bits(3);
+        else rep = 11 + bits(7);
+        if (i + rep > hlit + hdist) throw bad('碼長超量');
+        while (rep--) lens[i++] = val;
+      }
+      if (!lens[256]) throw bad('缺區塊結束碼');
+      lit = buildHuffman(lens.subarray(0, hlit), hlit);
+      dist = buildHuffman(lens.subarray(hlit), hdist);
+    } else {
+      throw bad('區塊類型錯誤');
+    }
+    for (;;) {
+      let sym = decode(lit);
+      if (sym < 256) {
+        out[op++] = sym;
+        if (op === cap) yield* flushIfFull(false);
+        continue;
+      }
+      if (sym === 256) break;
+      sym -= 257;
+      if (sym >= 29) throw bad('長度碼錯誤');
+      const len = LEN_BASE[sym] + bits(LEN_EXTRA[sym]);
+      const ds = decode(dist);
+      if (ds >= 30) throw bad('距離碼錯誤');
+      const d = DIST_BASE[ds] + bits(DIST_EXTRA[ds]);
+      if (d > op) throw bad('回溯距離超出');
+      if (op + len > cap) yield* flushIfFull(true);
+      let from = op - d;
+      for (let k = 0; k < len; k++) out[op++] = out[from++];
+      if (op === cap) yield* flushIfFull(false);
+    }
+  }
+  yield* flushIfFull(true);
+}
+
+function inflateRaw(src) {
+  const parts = [];
+  let total = 0;
+  for (const c of inflateRawChunks(src)) { parts.push(c); total += c.length; }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const c of parts) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+return { inflateRawChunks, inflateRaw };
+})();
+
+// ---- core/zip.js ----
+const __m_core_zip_js = (function () {
+// ZIP 讀寫（xlsx、備份用）。讀：支援 stored／deflate，驗 CRC32；寫：stored（不壓縮），一律 UTF-8 檔名。
+const { SpecError } = __m_core_errors_js;
+const { inflateRawChunks } = __m_core_inflate_js;
+const { utf8 } = __m_core_util_js;
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32Update(crc, bytes) {
+  let c = crc ^ 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function crc32(bytes) {
+  return crc32Update(0, bytes);
+}
+
+const u16 = (b, o) => b[o] | (b[o + 1] << 8);
+const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+
+function bad(msg) {
+  return new SpecError('ZIP', 'ZIP檔格式錯誤：' + msg);
+}
+
+// 回傳 [{name, method, crc, compSize, size, offset}]
+function zipEntries(bytes) {
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (u32(bytes, i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw bad('找不到目錄結尾（檔案可能不是xlsx／zip或已損毀）');
+  let count = u16(bytes, eocd + 10);
+  let cdOff = u32(bytes, eocd + 16);
+  if (cdOff === 0xffffffff || count === 0xffff) {
+    const loc = eocd - 20;
+    if (loc < 0 || u32(bytes, loc) !== 0x07064b50) throw bad('ZIP64目錄定位錯誤');
+    const z64 = Number(u32(bytes, loc + 8)) + Number(u32(bytes, loc + 12)) * 2 ** 32;
+    if (u32(bytes, z64) !== 0x06064b50) throw bad('ZIP64目錄結尾錯誤');
+    count = Number(u32(bytes, z64 + 32)) + Number(u32(bytes, z64 + 36)) * 2 ** 32;
+    cdOff = Number(u32(bytes, z64 + 48)) + Number(u32(bytes, z64 + 52)) * 2 ** 32;
+  }
+  const out = [];
+  const dec = new TextDecoder('utf-8');
+  let p = cdOff;
+  for (let i = 0; i < count; i++) {
+    if (u32(bytes, p) !== 0x02014b50) throw bad('中央目錄項目錯誤');
+    const method = u16(bytes, p + 10);
+    const crc = u32(bytes, p + 16);
+    let compSize = u32(bytes, p + 20);
+    let size = u32(bytes, p + 24);
+    const nl = u16(bytes, p + 28); const el = u16(bytes, p + 30); const cl = u16(bytes, p + 32);
+    let offset = u32(bytes, p + 42);
+    const name = dec.decode(bytes.subarray(p + 46, p + 46 + nl));
+    // ZIP64 延伸欄位
+    let e = p + 46 + nl;
+    const eEnd = e + el;
+    while (e + 4 <= eEnd) {
+      const id = u16(bytes, e); const len = u16(bytes, e + 2);
+      if (id === 1) {
+        let q = e + 4;
+        const rd = () => { const v = Number(u32(bytes, q)) + Number(u32(bytes, q + 4)) * 2 ** 32; q += 8; return v; };
+        if (size === 0xffffffff) size = rd();
+        if (compSize === 0xffffffff) compSize = rd();
+        if (offset === 0xffffffff) offset = rd();
+      }
+      e += 4 + len;
+    }
+    out.push({ name, method, crc, compSize, size, offset });
+    p += 46 + nl + el + cl;
+  }
+  return out;
+}
+
+function dataStart(bytes, ent) {
+  if (u32(bytes, ent.offset) !== 0x04034b50) throw bad(`本地檔頭錯誤：${ent.name}`);
+  return ent.offset + 30 + u16(bytes, ent.offset + 26) + u16(bytes, ent.offset + 28);
+}
+
+// 逐段解出一個項目；全部讀完後驗 CRC32 與大小
+function* zipEntryChunks(bytes, ent) {
+  const start = dataStart(bytes, ent);
+  const comp = bytes.subarray(start, start + ent.compSize);
+  let crc = 0; let size = 0;
+  if (ent.method === 0) {
+    const step = 1 << 20;
+    for (let i = 0; i < comp.length; i += step) {
+      const c = comp.subarray(i, i + step);
+      crc = crc32Update(crc, c); size += c.length;
+      yield c;
+    }
+  } else if (ent.method === 8) {
+    for (const c of inflateRawChunks(comp)) {
+      crc = crc32Update(crc, c); size += c.length;
+      yield c;
+    }
+  } else {
+    throw bad(`不支援的壓縮方式 ${ent.method}：${ent.name}`);
+  }
+  if (size !== ent.size || crc !== ent.crc) throw bad(`內容校驗不符：${ent.name}`);
+}
+
+function zipEntryBytes(bytes, ent) {
+  const parts = [];
+  let total = 0;
+  for (const c of zipEntryChunks(bytes, ent)) { parts.push(c); total += c.length; }
+  if (parts.length === 1) return parts[0];
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const c of parts) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+function readZip(bytes) {
+  const entries = zipEntries(bytes);
+  const byName = new Map(entries.map((e) => [e.name, e]));
+  return {
+    entries,
+    has: (n) => byName.has(n),
+    entry: (n) => byName.get(n) || null,
+    bytes: (n) => { const e = byName.get(n); return e ? zipEntryBytes(bytes, e) : null; },
+    text: (n) => { const e = byName.get(n); return e ? new TextDecoder('utf-8').decode(zipEntryBytes(bytes, e)) : null; },
+    chunks: (n) => { const e = byName.get(n); if (!e) throw bad(`缺少 ${n}`); return zipEntryChunks(bytes, e); },
+  };
+}
+
+// 寫 ZIP（stored）。files：[{name, data: Uint8Array|string}]；comment：字串（ZIP註解，限65535位元組）
+function writeZip(files, { comment = '', dosTime = 0, dosDate = 0x21 } = {}) {
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  const push = (arr) => { parts.push(arr); offset += arr.length; };
+  for (const f of files) {
+    const name = utf8(f.name);
+    const data = typeof f.data === 'string' ? utf8(f.data) : f.data;
+    if (data.length >= 0xffffffff || offset >= 0xffffffff) throw new SpecError('ZIP', 'ZIP 超過 4GB，請分批');
+    const crc = crc32(data);
+    const lh = new Uint8Array(30 + name.length);
+    const dv = new DataView(lh.buffer);
+    dv.setUint32(0, 0x04034b50, true); dv.setUint16(4, 20, true); dv.setUint16(6, 0x0800, true);
+    dv.setUint16(8, 0, true); dv.setUint16(10, dosTime, true); dv.setUint16(12, dosDate, true);
+    dv.setUint32(14, crc, true); dv.setUint32(18, data.length, true); dv.setUint32(22, data.length, true);
+    dv.setUint16(26, name.length, true); dv.setUint16(28, 0, true);
+    lh.set(name, 30);
+    const at = offset;
+    push(lh);
+    push(data);
+    const ch = new Uint8Array(46 + name.length);
+    const cv = new DataView(ch.buffer);
+    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true); cv.setUint16(12, dosTime, true); cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true); cv.setUint32(42, at, true);
+    ch.set(name, 46);
+    central.push(ch);
+  }
+  const cdStart = offset;
+  for (const c of central) push(c);
+  const cm = utf8(comment);
+  if (cm.length > 65535) throw new SpecError('ZIP', 'ZIP註解過長');
+  const end = new Uint8Array(22 + cm.length);
+  const ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
+  ev.setUint32(12, offset - cdStart, true); ev.setUint32(16, cdStart, true); ev.setUint16(20, cm.length, true);
+  end.set(cm, 22);
+  push(end);
+  const out = new Uint8Array(offset);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+function zipComment(bytes) {
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (u32(bytes, i) === 0x06054b50) return new TextDecoder('utf-8').decode(bytes.subarray(i + 22, i + 22 + u16(bytes, i + 20)));
+  }
+  return null;
+}
+
+return { crc32Update, crc32, zipEntries, zipEntryChunks, zipEntryBytes, readZip, writeZip, zipComment };
+})();
+
+// ---- core/xlsx.js ----
+const __m_core_xlsx_js = (function () {
+// xlsx 讀取（自行實作，不依賴外部函式庫）：工作表清單、共用字串、日期格式、逐列串流讀取。
+// 儲存格一律回傳原始文字（數值保留 Excel 存的文字，不經浮點轉換），另附型別：
+//   s＝文字、n＝數值、d＝日期格式之數值（附 iso）、b＝布林、e＝錯誤、f＝公式文字結果。
+const { SpecError } = __m_core_errors_js;
+const { readZip } = __m_core_zip_js;
+const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+function xmlUnescape(s) {
+  if (s.indexOf('&') < 0 && s.indexOf('_x') < 0) return s;
+  return s.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (m, e) => {
+    if (e[0] === '#') return String.fromCodePoint(e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10));
+    return ENT[e];
+  }).replace(/_x([0-9A-Fa-f]{4})_/g, (m, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+function attr(tag, name) {
+  const m = new RegExp(`\\s${name}="([^"]*)"`).exec(tag);
+  return m ? xmlUnescape(m[1]) : null;
+}
+
+// 文字節點：<t>…</t>（含rich text <r><t>）；排除注音 <rPh>
+function textOf(xml) {
+  const clean = xml.replace(/<rPh\b[\s\S]*?<\/rPh>/g, '');
+  let out = '';
+  const re = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>|<t(?:\s[^>]*)?\/>/g;
+  let m;
+  while ((m = re.exec(clean))) out += m[1] ? xmlUnescape(m[1]) : '';
+  return out;
+}
+
+function colIndex(ref) {
+  let n = 0;
+  for (let i = 0; i < ref.length; i++) {
+    const c = ref.charCodeAt(i);
+    if (c < 65 || c > 90) break;
+    n = n * 26 + (c - 64);
+  }
+  return n - 1;
+}
+
+function colName(i) {
+  let s = '';
+  i += 1;
+  while (i > 0) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); }
+  return s;
+}
+
+const BUILTIN_DATE = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 46, 47, 50, 57]);
+
+function isDateFormat(code) {
+  const s = code.replace(/"[^"]*"/g, '').replace(/\[[^\]]*\]/g, '').replace(/\\./g, '');
+  return /[ymdhs]/i.test(s) && !/^[#0.,%\s]*$/.test(s);
+}
+
+function parseStyles(xml) {
+  if (!xml) return new Set();
+  const custom = new Map();
+  for (const m of xml.matchAll(/<numFmt\b[^>]*>/g)) {
+    const id = Number(attr(m[0], 'numFmtId'));
+    const code = attr(m[0], 'formatCode') || '';
+    custom.set(id, code);
+  }
+  const dateStyles = new Set();
+  const xfs = /<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/.exec(xml);
+  if (!xfs) return dateStyles;
+  let i = 0;
+  for (const m of xfs[1].matchAll(/<xf\b[^>]*>/g)) {
+    const id = Number(attr(m[0], 'numFmtId') || 0);
+    if (BUILTIN_DATE.has(id) || (custom.has(id) && isDateFormat(custom.get(id)))) dateStyles.add(i);
+    i++;
+  }
+  return dateStyles;
+}
+
+// Excel 日期序號→YYYY-MM-DD（1900系統：以1899-12-30為0；1904系統另計）
+function serialToIso(text, date1904) {
+  const v = Number(text);
+  if (!Number.isFinite(v)) return null;
+  const days = Math.floor(v) + (date1904 ? 1462 : 0);
+  const ms = Date.UTC(1899, 11, 30) + days * 86400000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function resolveTarget(target) {
+  if (target.startsWith('/')) return target.slice(1);
+  return 'xl/' + target.replace(/^\.\//, '');
+}
+
+function openXlsx(bytes) {
+  let zip;
+  try {
+    zip = readZip(bytes);
+  } catch (e) {
+    throw new SpecError('XLSX', '無法讀取xlsx（' + e.message + '）；若為舊版.xls請另存為.xlsx或CSV UTF-8');
+  }
+  const wbXml = zip.text('xl/workbook.xml');
+  if (!wbXml) throw new SpecError('XLSX', '不是xlsx檔（缺 xl/workbook.xml）');
+  const relsXml = zip.text('xl/_rels/workbook.xml.rels') || '';
+  const rels = new Map();
+  for (const m of relsXml.matchAll(/<Relationship\b[^>]*>/g)) rels.set(attr(m[0], 'Id'), attr(m[0], 'Target'));
+  const sheets = [];
+  for (const m of wbXml.matchAll(/<sheet\b[^>]*>/g)) {
+    const rid = attr(m[0], 'r:id') || attr(m[0], 'id');
+    const target = rels.get(rid);
+    if (target) sheets.push({ name: attr(m[0], 'name'), path: resolveTarget(target), state: attr(m[0], 'state') || 'visible' });
+  }
+  const date1904 = /<workbookPr\b[^>]*date1904="(1|true)"/.test(wbXml);
+  let shared = null;
+  let dateStyles = null;
+  const loadShared = () => {
+    if (shared) return shared;
+    shared = [];
+    if (!zip.has('xl/sharedStrings.xml')) return shared;
+    // 逐段解析 <si>，避免整檔一次轉字串
+    const dec = new TextDecoder('utf-8');
+    let buf = '';
+    for (const chunk of zip.chunks('xl/sharedStrings.xml')) {
+      buf += dec.decode(chunk, { stream: true });
+      let end = buf.lastIndexOf('</si>');
+      if (end < 0) continue;
+      end += 5;
+      const part = buf.slice(0, end);
+      buf = buf.slice(end);
+      for (const m of part.matchAll(/<si>([\s\S]*?)<\/si>|<si\/>/g)) shared.push(m[1] ? textOf(m[1]) : '');
+    }
+    buf += dec.decode();
+    for (const m of buf.matchAll(/<si>([\s\S]*?)<\/si>|<si\/>/g)) shared.push(m[1] ? textOf(m[1]) : '');
+    return shared;
+  };
+  const styles = () => {
+    if (!dateStyles) dateStyles = parseStyles(zip.text('xl/styles.xml'));
+    return dateStyles;
+  };
+  return {
+    sheets: sheets.map((s) => s.name),
+    // 逐列產生 {rowNo, cells: Map(col → {v, t, iso?})}；wanted(col)：只解析需要的欄（加速）
+    *rows(sheetName, { wanted } = {}) {
+      const sh = sheets.find((s) => s.name === sheetName) || (sheetName ? null : sheets[0]);
+      if (!sh) throw new SpecError('XLSX', `找不到工作表：${sheetName}`);
+      const sst = loadShared();
+      const ds = styles();
+      const dec = new TextDecoder('utf-8');
+      let buf = '';
+      let nextRow = 1;
+      const parseRow = (attrs, inner) => {
+        const r = attr(attrs, 'r');
+        const rowNo = r ? Number(r) : nextRow;
+        nextRow = rowNo + 1;
+        const cells = new Map();
+        let nextCol = 0;
+        if (inner) {
+          const cre = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+          let m;
+          while ((m = cre.exec(inner))) {
+            const a = m[1];
+            const ref = attr(a, 'r');
+            const col = ref ? colIndex(ref) : nextCol;
+            nextCol = col + 1;
+            if (wanted && !wanted(col)) continue;
+            const body = m[2] || '';
+            const t = attr(a, 't') || 'n';
+            let v = null;
+            let type = t;
+            if (t === 'inlineStr') { v = textOf(body); type = 's'; } else {
+              const vm = /<v>([\s\S]*?)<\/v>/.exec(body);
+              if (!vm) continue;
+              v = xmlUnescape(vm[1]);
+              if (t === 's') { v = sst[Number(v)]; if (v === undefined) throw new SpecError('XLSX', `共用字串索引錯誤（第${rowNo}列）`); type = 's'; }
+              else if (t === 'str') type = 'f';
+              else if (t === 'b') v = v === '1' ? 'TRUE' : 'FALSE';
+            }
+            const cell = { v, t: type };
+            if (type === 'n') {
+              const s = attr(a, 's');
+              if (s !== null && ds.has(Number(s))) { cell.t = 'd'; cell.iso = serialToIso(v, date1904); }
+            }
+            cells.set(col, cell);
+          }
+        }
+        return { rowNo, cells };
+      };
+      const rowRe = /<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g;
+      for (const chunk of zip.chunks(sh.path)) {
+        buf += dec.decode(chunk, { stream: true });
+        let end = buf.lastIndexOf('</row>');
+        if (end < 0) continue;
+        end += 6;
+        const part = buf.slice(0, end);
+        buf = buf.slice(end);
+        rowRe.lastIndex = 0;
+        let m;
+        while ((m = rowRe.exec(part))) yield parseRow(m[1], m[2]);
+      }
+      buf += dec.decode();
+      rowRe.lastIndex = 0;
+      let m;
+      while ((m = rowRe.exec(buf))) yield parseRow(m[1], m[2]);
+    },
+  };
+}
+
+return { xmlUnescape, colIndex, colName, serialToIso, openXlsx };
+})();
+
+// ---- core/table.js ----
+const __m_core_table_js = (function () {
+// 表格來源統一介面：xlsx 或 CSV（UTF-8，含BOM與否皆可）。CSV 一律文字讀入，保留前導零。
+const { SpecError } = __m_core_errors_js;
+const { openXlsx } = __m_core_xlsx_js;
+const EXCEL_MAX_ROW = 1048576;
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let q = false;
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        q = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"' && field === '') { q = true; i++; continue; }
+    if (c === ',') { row.push(field); field = ''; i++; continue; }
+    if (c === '\r' || c === '\n') {
+      row.push(field); field = '';
+      rows.push(row); row = [];
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      i++;
+      continue;
+    }
+    field += c; i++;
+  }
+  if (q) throw new SpecError('CSV', 'CSV引號未閉合（檔案可能不完整）');
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function decodeCsv(bytes) {
+  let b = bytes;
+  if (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) b = b.subarray(3);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(b);
+  } catch (e) {
+    throw new SpecError('CSV_ENCODING', 'CSV非UTF-8編碼，請於Excel另存為「CSV UTF-8（逗號分隔）」後再匯入');
+  }
+}
+
+function openTable(fileName, bytes) {
+  const lower = String(fileName || '').toLowerCase();
+  if (lower.endsWith('.csv') || lower.endsWith('.txt')) {
+    const rows = parseCsv(decodeCsv(bytes));
+    return {
+      kind: 'csv',
+      sheets: ['(CSV)'],
+      *rows() {
+        for (let r = 0; r < rows.length; r++) {
+          const cells = new Map();
+          rows[r].forEach((v, c) => { if (v !== '') cells.set(c, { v, t: 's' }); });
+          yield { rowNo: r + 1, cells };
+        }
+      },
+    };
+  }
+  if (lower.endsWith('.xls')) throw new SpecError('XLSX', '不支援舊版 .xls；請於Excel另存為 .xlsx 或 CSV UTF-8');
+  const x = openXlsx(bytes);
+  return { kind: 'xlsx', sheets: x.sheets, rows: (sheet, opts) => x.rows(sheet, opts) };
+}
+
+function cellText(cell) {
+  if (!cell || cell.v === null || cell.v === undefined) return null;
+  const s = String(cell.v).trim();
+  return s === '' ? null : s;
+}
+
+// 讀標題列：回傳欄名陣列（空白欄名以「(第N欄)」表示）與工作表最後列號估計不必
+function readHeaders(table, sheet, headerRow = 1) {
+  for (const r of table.rows(sheet)) {
+    if (r.rowNo < headerRow) continue;
+    if (r.rowNo > headerRow) break;
+    const max = r.cells.size ? Math.max(...r.cells.keys()) : -1;
+    const out = [];
+    for (let c = 0; c <= max; c++) out.push(cellText(r.cells.get(c)) || `(第${c + 1}欄)`);
+    return out;
+  }
+  throw new SpecError('NO_HEADER', `找不到第 ${headerRow} 列標題列`);
+}
+
+return { EXCEL_MAX_ROW, parseCsv, openTable, cellText, readHeaders };
+})();
+
+// ---- core/attachments.js ----
+const __m_core_attachments_js = (function () {
+// 附件：以 SHA-256 為儲存鍵（attachments/<前2碼>/<sha256>），不以使用者檔名當路徑；讀取一律驗雜湊（第13節）。
+const { SpecError } = __m_core_errors_js;
+const { attachmentPath } = __m_core_paths_js;
+const { sha256Bytes } = __m_core_util_js;
+const { insert, list } = __m_core_model_js;
+// 寫入檔案（已存在且雜湊相符則沿用；不符即中止）；回傳 {sha256, path, size}
+async function storeBlob(fs, bytes) {
+  const sha256 = await sha256Bytes(bytes);
+  const path = attachmentPath(sha256);
+  const exist = await fs.readBytes(path);
+  if (exist) {
+    if ((await sha256Bytes(exist.bytes)) !== sha256) throw new SpecError('REF_HASH', `附件檔已存在但雜湊不符：${path}`);
+    return { sha256, path, size: bytes.length, reused: true };
+  }
+  await fs.create(path, bytes);
+  const back = await fs.readBytes(path);
+  if (!back || (await sha256Bytes(back.bytes)) !== sha256) throw new SpecError('WRITE_VERIFY', '附件寫入後讀回雜湊不符');
+  return { sha256, path, size: bytes.length, reused: false };
+}
+
+async function readBlob(fs, sha256) {
+  const r = await fs.readBytes(attachmentPath(sha256));
+  if (!r) throw new SpecError('REF_MISSING', `附件檔不存在：${sha256}`);
+  if ((await sha256Bytes(r.bytes)) !== sha256) throw new SpecError('REF_HASH', `附件檔雜湊不符：${sha256}`);
+  return r.bytes;
+}
+
+function safeFileName(name) {
+  const base = String(name || '').split(/[\\/]/).pop();
+  return base.replace(/[\u0000-\u001f<>:"|?*]/g, '_').slice(0, 200) || '未命名';
+}
+
+// 建立附件紀錄與關聯（同一檔名再上傳者版本＋1）
+function addAttachmentRecord(data, ctx, { orig_name, sha256, size, mime }, links = []) {
+  const name = safeFileName(orig_name);
+  const prev = list(data, 'attachment').filter((a) => a.orig_name === name && links.length &&
+    list(data, 'attachment_link').some((l) => l.attachment_id === a.id && l.entity === links[0].entity && l.entity_id === links[0].entity_id));
+  const att = insert(data, ctx, 'attachment', { orig_name: name, storage_key: attachmentPath(sha256), sha256, size, mime: mime || null, version: prev.length + 1 });
+  for (const l of links) insert(data, ctx, 'attachment_link', { attachment_id: att.id, entity: l.entity, entity_id: l.entity_id });
+  return att;
+}
+
+return { storeBlob, readBlob, safeFileName, addAttachmentRecord };
+})();
+
+// ---- core/masterImport.js ----
+const __m_core_masterImport_js = (function () {
+// 主檔匯入（第7節）：欄位映射、試匯入檢核、啟用（列資料先寫入 masters/ 並驗雜湊）、版本差異。
+// 不依固定欄序；使用者選工作表、標題列及映射。新快照保留舊版；主檔消失品項不自動刪除認定。
+const { SpecError } = __m_core_errors_js;
+const { cellText, readHeaders, EXCEL_MAX_ROW } = __m_core_table_js;
+const { normalizeCode, normalizeMoney, parseDate } = __m_core_values_js;
+const { insert, setDedicated, list } = __m_core_model_js;
+const { masterPath } = __m_core_paths_js;
+const { newId, sha256Text, sha256Bytes } = __m_core_util_js;
+const { storeBlob, addAttachmentRecord } = __m_core_attachments_js;
+const MASTER_FIELDS = [
+  ['drug_code', '藥品代碼（必要）'], ['drug_name', '品名'], ['firm', '藥商名稱'], ['firm_code', '藥商代碼'],
+  ['group_code', '分組代碼'], ['group_name', '分組名稱'], ['atc_code', 'ATC碼'], ['atc_name', 'ATC名稱'],
+  ['dose_code', '核價劑型代碼'], ['dose_name', '核價劑型名稱'], ['ingredient', '成分'], ['strength', '含量'],
+  ['multi_mark', '單複方註記'], ['spec_qty', '規格數值'], ['spec_unit', '規格單位'], ['price', '支付價'],
+  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'],
+];
+const FIELD_LABEL = Object.fromEntries(MASTER_FIELDS);
+const TARGETS = new Set(MASTER_FIELDS.map((x) => x[0]));
+const CODE_FIELDS = new Set(['group_code', 'atc_code', 'dose_code', 'firm_code']);
+// 列資料檔欄位順序
+const ROW_FIELDS = ['drug_code', 'drug_code_raw', ...MASTER_FIELDS.slice(1).map((x) => x[0]), 'annotation', 'source_row'];
+const COMPARE_FIELDS = ['drug_name', 'firm', 'firm_code', 'group_code', 'group_name', 'atc_code', 'dose_code', 'dose_name',
+  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no'];
+// 規則欄位所需之主檔欄位；缺少時停用該類規則（第7節第2點）
+const RULE_FIELD_NEEDS = {
+  group_code: ['group_code'], atc_code: ['atc_code'], dose_code: ['dose_code'], multi_mark: ['multi_mark'],
+  spec: ['spec_qty', 'spec_unit'], firm: ['firm'], firm_code: ['firm_code'], ingredient: ['ingredient'], drug_code: ['drug_code'],
+};
+// 已知規格單位；不在清單內視為未知單位→規則判定待確認
+const KNOWN_UNITS = ['ML', 'L', 'GM', 'MG', 'MCG', 'KG', 'IU', 'KIU', 'MIU', 'U', 'KU', 'MU', 'DOSE', 'MCL'];
+
+// 【設計建議】預設映射；匯入時仍由使用者確認
+const PRESETS = [
+  {
+    key: 'monthly', label: '月產製藥品主檔（如「藥品主檔全」、dwm_drug_115xx）',
+    mapping: {
+      drug_code: 'CODE', drug_name: '藥品名稱', firm: '藥商名稱', firm_code: '藥商代碼', group_code: '分組代碼', group_name: '分組名稱',
+      atc_code: 'ATC7碼', atc_name: 'ATC名稱', dose_code: 'PDOSE', dose_name: '核價劑型', ingredient: '成分名稱', strength: '成分含量',
+      multi_mark: '複方藥品', spec_qty: '規格量', spec_unit: '規格單位', annotation_raw: '必要藥品', license_no: '許可證號',
+    },
+    note: '支付價欄依資料基準日選 PRICE11510／price11511 等（系統依基準日預選）。必要藥品空白視為0（一般藥品）。',
+  },
+  {
+    key: 'daily', label: 'DWM_DRUG SQL Server 每日檔（依 table layout 欄名）',
+    mapping: {
+      drug_code: 'DRUG_CODE', drug_name: 'DRUG_ENAME', firm_code: 'DRUGGIST_ID', group_code: 'DRUG_GROUP_CODE', atc_code: 'DRUG_ATC7_CODE',
+      dose_code: 'DRUG_APV_DOSE_CODE', ingredient: 'DRUG_ING_CODE', strength: 'DRUG_ING_QTY', multi_mark: 'DRUG_MULTI_MARK',
+      spec_qty: 'DRUG_STD_QTY_CODE', spec_unit: 'DRUG_STD_CODE', annotation_raw: 'DRUG_NECESSARY', license_no: 'LICID_7',
+    },
+    lookups: {
+      spec_qty: { type: '5', field: 'std_qty' }, spec_unit: { type: '2', field: 'ename' },
+      group_name: { type: '8', field: 'cname', from: 'group_code' }, atc_name: { type: '7', field: 'cname', from: 'atc_code' },
+      dose_name: { type: '1', field: 'cname', from: 'dose_code' },
+    },
+    note: '支付價另選 DWM_DRPAY 長表並指定資料基準日；規格量／單位代碼經 DWM_DRUG_RCODE 轉換。',
+  },
+];
+
+// 依資料基準日預選支付價欄：priceYYYMM（民國年月）
+function suggestPriceColumn(headers, baseDate) {
+  const cands = headers.filter((h) => /^price\d{5}$/i.test(h));
+  if (!cands.length) return null;
+  if (baseDate) {
+    const [y, m] = baseDate.split('-');
+    const want = `${Number(y) - 1911}${m}`;
+    const hit = cands.find((h) => h.slice(5) === want);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function presetMapping(presetKey, headers, baseDate) {
+  const p = PRESETS.find((x) => x.key === presetKey);
+  if (!p) return {};
+  const m = {};
+  for (const [t, src] of Object.entries(p.mapping)) if (headers.includes(src)) m[t] = src;
+  if (presetKey === 'monthly') { const pc = suggestPriceColumn(headers, baseDate); if (pc) m.price = pc; }
+  return m;
+}
+
+function normUnit(u) {
+  if (u === null || u === undefined) return null;
+  const s = String(u).trim().toUpperCase().replace(/\s*\(.*\)\s*$/, '');
+  return s || null;
+}
+
+// 必要藥品註記正規化：空白＝0（一般藥品）【已確認：使用者 2026-11-06】
+function normAnnotation(raw) {
+  const s = raw === null || raw === undefined ? '' : String(raw).trim();
+  return s === '' ? '0' : s;
+}
+
+const tickEvery = 2000;
+async function maybeTick(n, tick) {
+  if (tick && n % tickEvery === 0) await tick(n);
+}
+
+// DWM_DRUG_RCODE：Map('type|code' → {cname, ename, std_qty})
+async function loadRcode(table, { sheet, headerRow = 1, tick } = {}) {
+  const h = readHeaders(table, sheet, headerRow);
+  const col = (n) => h.indexOf(n);
+  const need = ['DRUG_REL_CODE_TYPE', 'DRUG_REL_CODE', 'DRUG_REL_CODE_CNAME', 'DRUG_REL_CODE_ENAME', 'DRUG_STD_QTY'];
+  if (col(need[0]) < 0 || col(need[1]) < 0) throw new SpecError('RCODE', '代碼檔缺 DRUG_REL_CODE_TYPE／DRUG_REL_CODE 欄，請確認是 DWM_DRUG_RCODE 匯出檔');
+  const out = new Map();
+  let n = 0;
+  for (const r of table.rows(sheet)) {
+    if (r.rowNo <= headerRow) continue;
+    const t = cellText(r.cells.get(col(need[0])));
+    const c = cellText(r.cells.get(col(need[1])));
+    if (!t || !c) continue;
+    const q = cellText(r.cells.get(col(need[4])));
+    out.set(`${t}|${c}`, { cname: cellText(r.cells.get(col(need[2]))), ename: cellText(r.cells.get(col(need[3]))), std_qty: q === null ? null : normalizeMoney(q) });
+    await maybeTick(++n, tick);
+  }
+  if (!out.size) throw new SpecError('RCODE', '代碼檔沒有可用資料');
+  return out;
+}
+
+// 多期價格長表：依基準日取 起日≤基準日≤迄日（迄日含）之價格；同代碼多筆不同價→矛盾
+async function loadPriceLong(table, { sheet, headerRow = 1, cols, baseDate, tick }) {
+  if (!baseDate) throw new SpecError('NEED_BASE_DATE', '價格長表須先指定資料基準日，不任取第一筆');
+  const h = readHeaders(table, sheet, headerRow);
+  const idx = {};
+  for (const k of ['code', 'from', 'to', 'price']) {
+    idx[k] = h.indexOf(cols[k]);
+    if (idx[k] < 0) throw new SpecError('MAP_MISSING', `價格檔找不到欄位：${cols[k]}`);
+  }
+  const prices = new Map();
+  const conflicts = new Map();
+  let last = 0; let n = 0;
+  for (const r of table.rows(sheet)) {
+    if (r.rowNo <= headerRow) continue;
+    last = r.rowNo;
+    const { code, error } = normalizeCode(cellText(r.cells.get(idx.code)));
+    if (error) continue;
+    const dv = (c) => { const cell = r.cells.get(c); if (!cell) return null; return cell.iso || parseDate(cellText(cell)); };
+    const s = dv(idx.from); const e = dv(idx.to);
+    if (!s || s > baseDate || (e && e < baseDate)) continue;
+    const p = normalizeMoney(cellText(r.cells.get(idx.price)));
+    if (prices.has(code) && prices.get(code) !== p) {
+      if (!conflicts.has(code)) conflicts.set(code, new Set([prices.get(code)]));
+      conflicts.get(code).add(p);
+    }
+    prices.set(code, p);
+    await maybeTick(++n, tick);
+  }
+  return { prices, conflicts, truncated: last >= EXCEL_MAX_ROW };
+}
+
+function sameRec(a, b) {
+  const diffs = {};
+  for (const k of [...COMPARE_FIELDS, 'drug_code_raw']) if ((a[k] ?? null) !== (b[k] ?? null)) diffs[k] = [a[k] ?? null, b[k] ?? null];
+  return diffs;
+}
+
+// 試匯入：不寫任何檔案，回傳 {records(Map), check}
+async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, tick }) {
+  if (!mapping || !mapping.drug_code) throw new SpecError('MAP_REQUIRED', '必須映射「藥品代碼」欄位');
+  const bad = Object.keys(mapping).filter((k) => !TARGETS.has(k));
+  if (bad.length) throw new SpecError('MAP_UNKNOWN', '未知的映射目標：' + bad.join('、'));
+  const base = baseDate ? parseDate(baseDate) : null;
+  if (baseDate && !base) throw new SpecError('BAD_DATE', '資料基準日格式錯誤');
+  const lk = lookups || {};
+  if (Object.keys(lk).length && !rcode) throw new SpecError('NEED_RCODE', '此映射需代碼轉換，請另選 DWM_DRUG_RCODE 檔');
+  const headers = readHeaders(table, sheet, headerRow);
+  const src = {};
+  const missingSrc = [];
+  for (const [t, name] of Object.entries(mapping)) {
+    if (!name) continue;
+    const i = headers.indexOf(name);
+    if (i < 0) missingSrc.push(`${FIELD_LABEL[t]}←${name}`); else src[t] = i;
+  }
+  if (missingSrc.length) throw new SpecError('MAP_MISSING', '來源檔找不到映射欄位：' + missingSrc.join('、'));
+  const wanted = new Set(Object.values(src));
+  const records = new Map();
+  const rowsOf = new Map();
+  const codeErrors = []; const warnings = []; const identical = []; const conflicts = [];
+  const unknownLookup = {}; const unknownUnits = new Map(); const badPrices = [];
+  let total = 0; let last = 0;
+  for (const r of table.rows(sheet, { wanted: (c) => wanted.has(c) })) {
+    if (r.rowNo <= headerRow) continue;
+    last = r.rowNo;
+    if (![...wanted].some((c) => cellText(r.cells.get(c)) !== null)) continue;
+    total++;
+    const codeCell = r.cells.get(src.drug_code);
+    const rawCode = cellText(codeCell);
+    let { code, error } = normalizeCode(rawCode);
+    if (!error && codeCell && codeCell.t === 'n') { code = null; error = `代碼為數值型儲存格（${rawCode}），可能遺失前導零，不自行補碼`; }
+    if (error) { codeErrors.push({ row: r.rowNo, error }); await maybeTick(total, tick); continue; }
+    const rec = { drug_code: code, drug_code_raw: codeCell ? String(codeCell.v) : null };
+    for (const [t, ci] of Object.entries(src)) {
+      if (t === 'drug_code') continue;
+      const cell = r.cells.get(ci);
+      const v = cellText(cell);
+      if (CODE_FIELDS.has(t) && cell && cell.t === 'n' && !lk[t]) warnings.push(`第${r.rowNo}列 ${FIELD_LABEL[t]} 為數值型（${v}），可能遺失前導零`);
+      if (t === 'price') {
+        const p = v === null ? null : normalizeMoney(v);
+        if (v !== null && p === null) badPrices.push(r.rowNo);
+        rec.price = p;
+      } else if (t === 'spec_qty' && !lk.spec_qty) {
+        rec.spec_qty = v === null ? null : (normalizeMoney(v) ?? v);
+      } else {
+        rec[t] = v;
+      }
+    }
+    for (const [t, conf] of Object.entries(lk)) {
+      const fromT = conf.from || t;
+      const key = rec[fromT];
+      if (key === null || key === undefined) { if (!conf.from) rec[t] = null; continue; }
+      const hit = rcode.get(`${conf.type}|${key}`);
+      if (!hit) {
+        (unknownLookup[t] = unknownLookup[t] || new Set()).add(key);
+        if (!conf.from) rec[t] = null;
+      } else {
+        rec[t] = hit[conf.field] ?? null;
+      }
+    }
+    if (price) rec.price = price.prices.has(code) ? price.prices.get(code) : null;
+    if (rec.spec_unit !== undefined) {
+      const u = normUnit(rec.spec_unit);
+      rec.spec_unit = u;
+      if (u && !KNOWN_UNITS.includes(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
+    }
+    rec.annotation = mapping.annotation_raw ? normAnnotation(rec.annotation_raw) : null;
+    rec.source_row = r.rowNo;
+    if (!rowsOf.has(code)) rowsOf.set(code, []);
+    rowsOf.get(code).push(r.rowNo);
+    if (records.has(code)) {
+      const diffs = sameRec(records.get(code), rec);
+      if (Object.keys(diffs).length) conflicts.push({ code, rows: [...rowsOf.get(code)], diffs });
+      else identical.push({ code, rows: [...rowsOf.get(code)] });
+    } else {
+      records.set(code, rec);
+    }
+    await maybeTick(total, tick);
+  }
+  if (price) {
+    for (const [code, vals] of price.conflicts) {
+      if (records.has(code)) conflicts.push({ code, rows: rowsOf.get(code), diffs: { price: [...vals] }, note: '價格長表於基準日有多筆不同價格' });
+    }
+  }
+  if (last >= EXCEL_MAX_ROW || (price && price.truncated)) warnings.unshift('來源資料達Excel列數上限（1,048,576列），可能已被截斷，請改用完整CSV匯出');
+  if (badPrices.length) warnings.push(`支付價無法解析 ${badPrices.length} 列（例：第${badPrices.slice(0, 5).join('、')}列），該列價格留空`);
+  const mapped = new Set([...Object.keys(src), ...Object.keys(lk), ...(price ? ['price'] : [])]);
+  const disabledRules = Object.entries(RULE_FIELD_NEEDS).filter(([, need]) => need.some((f) => !mapped.has(f))).map(([k]) => k);
+  const conflictCodes = new Set(conflicts.map((c) => c.code));
+  const check = {
+    total_rows: total, codes: records.size, last_row: last,
+    code_error_count: codeErrors.length, code_errors: codeErrors.slice(0, 500),
+    identical_duplicate_count: identical.length, identical_duplicates: identical.slice(0, 500),
+    conflict_count: conflicts.length, conflicts: conflicts.slice(0, 500),
+    warning_count: warnings.length, warnings: warnings.slice(0, 200),
+    unknown_units: Object.fromEntries([...unknownUnits.entries()].sort((a, b) => b[1] - a[1])),
+    unknown_lookup: Object.fromEntries(Object.entries(unknownLookup).map(([k, v]) => [k, [...v].slice(0, 50)])),
+    unknown_lookup_count: Object.fromEntries(Object.entries(unknownLookup).map(([k, v]) => [k, v.size])),
+    unmapped_fields: MASTER_FIELDS.map((x) => x[0]).filter((t) => !mapped.has(t)),
+    disabled_rule_fields: disabledRules,
+    missing_values: Object.fromEntries([...mapped].filter((f) => f !== 'drug_code').map((f) => [f, [...records.values()].filter((x) => x[f] === null || x[f] === undefined).length])),
+    base_date: base,
+  };
+  return { records, check, headers, mapping: { ...mapping }, lookups: lk, conflictCodes, sheet: sheet || null, headerRow };
+}
+
+// 啟用前檢查（不寫檔）
+function activationProblems(staged, { confirmMerge } = {}) {
+  const c = staged.check;
+  const p = [];
+  if (!c.base_date) p.push('主檔啟用須有資料基準日');
+  if (c.conflict_count) p.push(`同代碼內容矛盾 ${c.conflict_count} 筆，阻止啟用：` + c.conflicts.slice(0, 10).map((x) => `${x.code}（列 ${x.rows.join(',')}：${Object.keys(x.diffs).join(',')}）`).join('；'));
+  if (c.code_error_count) p.push(`有 ${c.code_error_count} 列藥品代碼錯誤（如數值型、空白、科學記號），請修正來源後重新匯入`);
+  if (c.identical_duplicate_count && !confirmMerge) p.push(`有 ${c.identical_duplicate_count} 個代碼完全相同重複列，須確認合併後再啟用`);
+  if (!c.codes) p.push('沒有可匯入之品項');
+  return p;
+}
+
+function rowsFileText(importId, staged, meta) {
+  const rows = [];
+  for (const rec of staged.records.values()) rows.push(ROW_FIELDS.map((f) => (rec[f] === undefined ? null : rec[f])));
+  return JSON.stringify({ format: 'specdrug-master', import_id: importId, base_date: staged.check.base_date, source_name: meta.source_name, source_sha256: meta.source_sha256, fields: ROW_FIELDS, rows }) + '\n';
+}
+
+// 啟用（於編輯模式）：①來源檔存為附件 ②列資料寫入 masters/ 並驗雜湊 ③建立主檔版本紀錄並停用舊版（整批成立）
+// sources：[{role:'主檔'|'代碼檔'|'價格長表', name, bytes}]
+async function activateMaster(session, staged, sources, { confirmMerge, note, opId } = {}) {
+  const problems = activationProblems(staged, { confirmMerge });
+  if (problems.length) throw new SpecError('ACTIVATE_BLOCKED', problems.join('；'));
+  if (session.mode !== 'edit') throw new SpecError('NOT_EDITING', '啟用主檔須先取得編輯牌');
+  const main = sources.find((s) => s.role === '主檔');
+  if (!main) throw new SpecError('NO_SOURCE', '缺主檔來源檔');
+  const stored = [];
+  for (const s of sources) stored.push({ ...s, ...(await storeBlob(session.fs, s.bytes)) });
+  const importId = newId();
+  const path = masterPath(importId);
+  const text = rowsFileText(importId, staged, { source_name: main.name, source_sha256: stored.find((s) => s.role === '主檔').sha256 });
+  const rowsSha = await sha256Text(text);
+  await session.fs.create(path, text);
+  const back = await session.fs.read(path);
+  if (!back || (await sha256Text(back.text)) !== rowsSha) throw new SpecError('WRITE_VERIFY', '主檔列資料寫入後讀回雜湊不符；未啟用');
+  const refs = [{ path, sha256: rowsSha, label: '主檔列資料' }, ...stored.map((s) => ({ path: s.path, sha256: s.sha256, label: `${s.role}來源檔 ${s.name}` }))];
+  const mainSha = stored.find((s) => s.role === '主檔').sha256;
+  return session.run((d, ctx) => {
+    const prev = activeImport(d);
+    const rec = insert(d, ctx, 'master_import', {
+      kind: 'drug', source_name: main.name, sha256: mainSha, base_date: staged.check.base_date, sheet: staged.sheet || null,
+      header_row: staged.headerRow || 1, mapping: { mapping: staged.mapping, lookups: staged.lookups, aux: sources.filter((s) => s.role !== '主檔').map((s) => ({ role: s.role, name: s.name })), price: staged.priceInfo || null },
+      row_count: staged.check.codes, check: { ...staged.check, merged_duplicates: !!confirmMerge }, rows_file: path, rows_sha256: rowsSha,
+      status: '已啟用', note: note || null,
+    }, { action: '試匯入並啟用' });
+    setDedicated(d, ctx, 'master_import', rec.id, { activated_by: ctx.actor, activated_at: ctx.now }, { action: '啟用主檔', fields: ['activated_by', 'activated_at'] });
+    if (prev) setDedicated(d, ctx, 'master_import', prev.id, { status: '已停用' }, { action: '停用舊主檔版本（保留）', fields: ['status'] });
+    for (const s of stored) addAttachmentRecord(d, ctx, { orig_name: s.name, sha256: s.sha256, size: s.size, mime: s.mime || null }, [{ entity: 'master_import', entity_id: rec.id }]);
+    return { import_id: rec.id, previous: prev ? prev.id : null };
+  }, { refs, opId, kind: '啟用主檔' });
+}
+
+function activeImport(data) {
+  return list(data, 'master_import').find((m) => m.status === '已啟用') || null;
+}
+
+function listImports(data) {
+  return list(data, 'master_import').slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+}
+
+// 讀取並驗證某版本列資料；回傳 {fields, rows, byCode(Map code→物件)}
+async function loadMasterRows(fs, imp) {
+  const rec = typeof imp === 'string' ? null : imp;
+  if (!rec) throw new SpecError('NOT_FOUND', '找不到主檔版本');
+  const r = await fs.read(rec.rows_file);
+  if (!r) throw new SpecError('REF_MISSING', `主檔列資料檔不存在：${rec.rows_file}`);
+  if ((await sha256Text(r.text)) !== rec.rows_sha256) throw new SpecError('REF_HASH', `主檔列資料檔雜湊不符：${rec.rows_file}`);
+  const f = JSON.parse(r.text);
+  const byCode = new Map();
+  for (const row of f.rows) {
+    const o = {};
+    f.fields.forEach((k, i) => { o[k] = row[i]; });
+    byCode.set(o.drug_code, o);
+  }
+  return { importId: f.import_id, fields: f.fields, byCode };
+}
+
+function diffMasters(oldRows, newRows, fields = COMPARE_FIELDS) {
+  const added = []; const removed = []; const changed = [];
+  for (const code of newRows.byCode.keys()) if (!oldRows.byCode.has(code)) added.push(code);
+  for (const code of oldRows.byCode.keys()) if (!newRows.byCode.has(code)) removed.push(code);
+  const fieldCount = {};
+  for (const [code, n] of newRows.byCode) {
+    const o = oldRows.byCode.get(code);
+    if (!o) continue;
+    const d = {};
+    for (const f of fields) if ((o[f] ?? null) !== (n[f] ?? null)) { d[f] = [o[f] ?? null, n[f] ?? null]; fieldCount[f] = (fieldCount[f] || 0) + 1; }
+    if (Object.keys(d).length) changed.push({ drug_code: code, diffs: d });
+  }
+  const sort = (a) => a.sort();
+  return { added: sort(added), removed: sort(removed), changed: changed.sort((a, b) => (a.drug_code < b.drug_code ? -1 : 1)), fieldCount };
+}
+
+// 試匯入結果與目前版本比較（啟用前預覽）
+function stagedAsRows(staged) {
+  return { byCode: staged.records };
+}
+
+function masterOptions(rows, field) {
+  const pairs = { group_code: 'group_name', atc_code: 'atc_name', dose_code: 'dose_name', drug_code: 'drug_name', firm_code: 'firm', multi_mark: null, spec_unit: null, firm: null };
+  const nameF = pairs[field];
+  const m = new Map();
+  for (const r of rows.byCode.values()) {
+    const v = r[field];
+    if (v === null || v === undefined || v === '') continue;
+    const e = m.get(v) || { value: v, label: nameF ? r[nameF] || '' : '', count: 0 };
+    e.count++;
+    m.set(v, e);
+  }
+  return [...m.values()].sort((a, b) => (a.value < b.value ? -1 : 1));
+}
+
+async function fileSha(bytes) {
+  return sha256Bytes(bytes);
+}
+
+
+return { MASTER_FIELDS, FIELD_LABEL, ROW_FIELDS, COMPARE_FIELDS, RULE_FIELD_NEEDS, KNOWN_UNITS, PRESETS, suggestPriceColumn, presetMapping, normUnit, normAnnotation, loadRcode, loadPriceLong, stageMaster, activationProblems, rowsFileText, activateMaster, activeImport, listImports, loadMasterRows, diffMasters, stagedAsRows, masterOptions, fileSha };
+})();
+
 // ---- core/demo.js ----
 const __m_core_demo_js = (function () {
 // 模擬資料（非真實資料）：供教育訓練與驗收展示。只可載入「新資料夾」（尚無任何業務資料）。
@@ -1876,6 +3002,7 @@ const __m_core_demo_js = (function () {
 const { SpecError } = __m_core_errors_js;
 const { insert, setConfirmStatus, setDedicated, list, SCHEMA } = __m_core_model_js;
 const { masterPath } = __m_core_paths_js;
+const { ROW_FIELDS, normAnnotation } = __m_core_masterImport_js;
 const DEMO_MASTER_COLUMNS = ['drug_code', 'drug_name', 'firm', 'group_code', 'atc_code', 'dose_code', 'dose_name', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation_raw'];
 
 const DEMO_ROWS = [
@@ -1897,12 +3024,13 @@ function demoMasterFile(importId) {
     const o = {};
     DEMO_MASTER_COLUMNS.forEach((c, j) => { o[c] = r[j] === '' ? null : r[j]; });
     o.drug_code_raw = o.drug_code;
+    o.annotation = normAnnotation(o.annotation_raw);
     o.source_row = i + 2;
-    return o;
+    return ROW_FIELDS.map((f) => (o[f] === undefined ? null : o[f]));
   });
   const file = {
     format: 'specdrug-master', import_id: importId, source_name: '模擬主檔.csv', base_date: '2026-10-01',
-    columns: DEMO_MASTER_COLUMNS, rows,
+    source_sha256: null, fields: ROW_FIELDS, rows,
   };
   return { path: masterPath(importId), text: JSON.stringify(file) + '\n', rowCount: rows.length };
 }
@@ -3502,6 +4630,247 @@ function meetingsTab(env) {
 return { casesTab, meetingsTab };
 })();
 
+// ---- ui/masterView.js ----
+const __m_ui_masterView_js = (function () {
+// 主檔匯入畫面（第7節、第10節）：選檔、工作表與標題列、欄位映射、試匯入檢核、差異預覽、啟用、歷史版本。
+const { h, table, dialog, alertBox } = __m_ui_dom_js;
+const M = __m_core_masterImport_js;
+const { openTable, readHeaders } = __m_core_table_js;
+const { parseDate, rocDisplay } = __m_core_values_js;
+const { newId } = __m_core_util_js;
+const { find } = __m_core_model_js;
+const rowsCache = new Map();
+
+async function masterRows(s, imp) {
+  if (!imp) return null;
+  if (rowsCache.has(imp.id)) return rowsCache.get(imp.id);
+  const r = await M.loadMasterRows(s.fs, imp);
+  rowsCache.set(imp.id, r);
+  return r;
+}
+
+function masterStatusText(data) {
+  const a = M.activeImport(data);
+  if (!a) return '主檔：尚未匯入';
+  return `主檔：${a.source_name}（基準日 ${a.base_date || '未填'}，${a.row_count} 筆）`;
+}
+
+function nextTick() {
+  return new Promise((resolve) => { setTimeout(resolve, 0); });
+}
+
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+function masterTab(env) {
+  const { s, ui, btn, guard, render } = env;
+  ui.master = ui.master || {};
+  const st = ui.master;
+  const d = data(env);
+  const act = M.activeImport(d);
+  const parts = [];
+  parts.push(h('section', { class: 'panel' }, h('h2', { text: '目前主檔版本' }),
+    act ? table(['項目', '內容'], [
+      ['來源檔', act.source_name], ['來源檔SHA-256', act.sha256], ['資料基準日', act.base_date ? `${act.base_date}（${rocDisplay(act.base_date)}）` : '未填'],
+      ['代碼數', String(act.row_count)], ['啟用', `${act.activated_by || ''}，${act.activated_at || ''}`], ['備註', act.note || ''],
+      ['規則停用欄位（未映射）', (act.check && act.check.disabled_rule_fields || []).join('、') || '無'],
+    ]) : h('p', { text: '尚未匯入主檔。規則預覽與快照須使用已啟用之主檔。' })));
+  parts.push(historyPanel(env, d, act));
+  if (s.mode === 'edit') parts.push(importPanel(env, act));
+  else parts.push(h('section', { class: 'panel' }, h('p', { class: 'note', text: '匯入新主檔須先取得編輯牌。' })));
+  if (st.diffView) parts.push(st.diffView);
+  void guard; void btn; void render;
+  return parts;
+}
+
+function historyPanel(env, d, act) {
+  const { btn, guard, ui, render } = env;
+  const imps = M.listImports(d);
+  return h('section', { class: 'panel' }, h('h2', { text: `歷史版本（${imps.length}）` }),
+    h('p', { class: 'note', text: '新版本啟用後舊版保留（已停用），列資料檔不覆寫。主檔消失品項不自動刪除認定或解讀成取消給付。' }),
+    table(['狀態', '資料基準日', '代碼數', '來源檔', 'SHA-256前8碼', '啟用時間', ''], imps.map((m) => [
+      m.status, m.base_date || '', String(m.row_count), m.source_name, (m.sha256 || '').slice(0, 8), m.activated_at || m.created_at,
+      act && m.id !== act.id ? btn('與目前版本比較', () => guard(async () => {
+        const [o, n] = [await masterRows(env.s, m), await masterRows(env.s, act)];
+        ui.master.diffView = diffPanel(env, M.diffMasters(o, n), `${m.source_name}（${m.base_date}）→ ${act.source_name}（${act.base_date}）`);
+        render();
+      })) : '',
+    ])));
+}
+
+function diffPanel(env, diff, title) {
+  const fields = Object.entries(diff.fieldCount).map(([f, n]) => `${M.FIELD_LABEL[f] || f} ${n}`).join('、');
+  return h('section', { class: 'panel' }, h('h2', { text: '版本差異：' + title }),
+    table(['項目', '筆數'], [['新增品項', String(diff.added.length)], ['消失品項（不自動取消認定）', String(diff.removed.length)], ['欄位異動品項', String(diff.changed.length)], ['異動欄位分布', fields || '—']]),
+    diff.added.length ? h('p', { class: 'note', text: '新增（前100）：' + diff.added.slice(0, 100).join('、') }) : null,
+    diff.removed.length ? h('p', { class: 'note', text: '消失（前100）：' + diff.removed.slice(0, 100).join('、') }) : null,
+    diff.changed.length ? table(['藥品代碼', '異動（舊→新）'], diff.changed.slice(0, 200).map((c) => [c.drug_code,
+      Object.entries(c.diffs).map(([f, [a, b]]) => `${M.FIELD_LABEL[f] || f}：${a ?? '（空）'}→${b ?? '（空）'}`).join('；')])) : null,
+    diff.changed.length > 200 ? h('p', { class: 'note', text: `僅列前200筆，共 ${diff.changed.length} 筆。` }) : null,
+    env.btn('關閉差異', () => { env.ui.master.diffView = null; env.render(); }));
+}
+
+function fileInput(label, onFile) {
+  return h('label', null, label + ' ', h('input', { type: 'file', accept: '.xlsx,.csv', on: { change: (e) => { const f = e.target.files[0]; if (f) onFile(f); } } }));
+}
+
+function importPanel(env, act) {
+  const { btn, guard, ui, render } = env;
+  const st = ui.master;
+  const box = h('section', { class: 'panel' }, h('h2', { text: '匯入新主檔' }),
+    h('p', { class: 'note', text: '支援 .xlsx 及 CSV UTF-8。不依固定欄序：請選工作表、標題列並確認欄位映射。試匯入不改目前主檔；確認後才啟用。大量匯入前建議先匯出備份。' }));
+  const status = h('p', { class: 'note', role: 'status' }, st.progress || '');
+  st.progressEl = status;
+  box.appendChild(h('div', { class: 'filters' }, fileInput('主檔檔案', (f) => guard(async () => {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    status.textContent = `讀取 ${f.name}（${(bytes.length / 1048576).toFixed(1)} MB）…`;
+    await nextTick();
+    const t = openTable(f.name, bytes);
+    Object.assign(st, { file: { name: f.name, bytes }, table: t, sheet: t.sheets[0], headerRow: 1, headers: null, staged: null, diffView: null, progress: '' });
+  }))));
+  if (st.table) {
+    const sheetSel = h('select', { 'aria-label': '工作表', on: { change: (e) => { st.sheet = e.target.value; st.headers = null; st.staged = null; render(); } } },
+      st.table.sheets.map((n) => h('option', { value: n, text: n, selected: n === st.sheet })));
+    const hdr = h('input', { type: 'number', value: String(st.headerRow), min: '1', style: 'width:5em', 'aria-label': '標題列' });
+    box.appendChild(h('div', { class: 'filters' }, h('span', { text: `檔案：${st.file.name}` }), h('label', null, '工作表 ', sheetSel), h('label', null, '標題列 ', hdr),
+      btn('讀取標題列', () => guard(async () => {
+        st.headerRow = Math.max(1, Number(hdr.value) || 1);
+        status.textContent = '讀取標題列…';
+        await nextTick();
+        st.headers = readHeaders(st.table, st.sheet, st.headerRow);
+        st.mapping = M.presetMapping(st.preset || 'monthly', st.headers, parseDate(st.baseDate || '') || null);
+        st.staged = null;
+      }))));
+  }
+  if (st.headers) box.appendChild(mappingForm(env));
+  if (st.staged) box.appendChild(stagedPanel(env, act));
+  box.appendChild(status);
+  return box;
+}
+
+function mappingForm(env) {
+  const { btn, guard, ui, render } = env;
+  const st = ui.master;
+  const presetSel = h('select', { 'aria-label': '預設映射', on: { change: (e) => {
+    st.preset = e.target.value;
+    st.mapping = M.presetMapping(st.preset, st.headers, parseDate(st.baseDate || '') || null);
+    st.staged = null; render();
+  } } }, M.PRESETS.map((p) => h('option', { value: p.key, text: p.label, selected: p.key === (st.preset || 'monthly') })));
+  const base = h('input', { type: 'text', size: 14, value: st.baseDate || '', placeholder: 'YYYY-MM-DD 或 115/11/01', 'aria-label': '資料基準日' });
+  base.addEventListener('change', () => {
+    st.baseDate = base.value.trim();
+    const iso = parseDate(st.baseDate);
+    if (iso && (st.preset || 'monthly') === 'monthly') { const pc = M.suggestPriceColumn(st.headers, iso); if (pc) st.mapping.price = pc; }
+    st.staged = null; render();
+  });
+  const preset = M.PRESETS.find((p) => p.key === (st.preset || 'monthly'));
+  const sel = {};
+  const rows = M.MASTER_FIELDS.map(([k, label]) => {
+    const s = h('select', { 'aria-label': label }, h('option', { value: '', text: '（不映射）' }),
+      st.headers.map((x) => h('option', { value: x, text: x, selected: st.mapping[k] === x })));
+    sel[k] = s;
+    const lk = preset.lookups && preset.lookups[k];
+    return [label, s, lk ? `經代碼檔 type ${lk.type} 轉換` : ''];
+  });
+  const usePrice = h('input', { type: 'checkbox', checked: !!st.usePriceLong });
+  usePrice.addEventListener('change', () => { st.usePriceLong = usePrice.checked; render(); });
+  const form = h('div', null,
+    h('div', { class: 'filters' }, h('label', null, '預設映射 ', presetSel), h('label', null, '資料基準日＊ ', base)),
+    h('p', { class: 'note', text: preset.note }),
+    table(['系統欄位', '來源欄', '說明'], rows),
+    h('div', { class: 'filters' }, h('label', null, usePrice, ' 支付價改由多期價格長表（如 DWM_DRPAY）依基準日取得')),
+    st.usePriceLong ? h('div', { class: 'filters' }, fileInput('價格長表', (f) => guard(async () => {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      st.priceFile = { name: f.name, bytes, table: openTable(f.name, bytes) };
+      st.priceFile.headers = readHeaders(st.priceFile.table, st.priceFile.table.sheets[0], 1);
+    })), st.priceFile ? h('span', { text: `${st.priceFile.name}：欄位 ${st.priceFile.headers.length} 個；預設 DRUG_CODE／PAY_S_DATE／PAY_E_DATE（含）／PAY_PRICE` }) : null) : null,
+    preset.lookups ? h('div', { class: 'filters' }, fileInput('代碼檔（DWM_DRUG_RCODE）', (f) => guard(async () => {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      st.rcodeFile = { name: f.name, bytes };
+    })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : null) : null,
+    h('div', { class: 'toolbar' }, btn('試匯入（不改目前主檔）', () => guard(async () => {
+      const mapping = {};
+      for (const [k, s] of Object.entries(sel)) if (s.value) mapping[k] = s.value;
+      st.mapping = mapping;
+      st.baseDate = base.value.trim();
+      const iso = parseDate(st.baseDate);
+      if (!iso) { await alertBox('請填資料基準日', '主檔啟用須有資料基準日（例：2026-11-01）。'); return; }
+      const prog = (label) => async (n) => { st.progressEl.textContent = `${label}：已處理 ${n.toLocaleString()} 列…`; await nextTick(); };
+      let rcode = null; let price = null;
+      if (preset.lookups) {
+        if (!st.rcodeFile) { await alertBox('缺代碼檔', '此預設映射需 DWM_DRUG_RCODE 代碼檔。'); return; }
+        const t = openTable(st.rcodeFile.name, st.rcodeFile.bytes);
+        rcode = await M.loadRcode(t, { sheet: t.sheets[0], tick: prog('讀取代碼檔') });
+      }
+      if (st.usePriceLong) {
+        if (!st.priceFile) { await alertBox('缺價格長表', '請選擇價格長表檔案。'); return; }
+        price = await M.loadPriceLong(st.priceFile.table, { sheet: st.priceFile.table.sheets[0], cols: { code: 'DRUG_CODE', from: 'PAY_S_DATE', to: 'PAY_E_DATE', price: 'PAY_PRICE' }, baseDate: iso, tick: prog('讀取價格長表') });
+        delete mapping.price;
+      }
+      const t0 = Date.now();
+      const staged = await M.stageMaster({ table: st.table, sheet: st.sheet, headerRow: st.headerRow, mapping, baseDate: iso, lookups: preset.lookups || null, rcode, price, tick: prog('試匯入') });
+      staged.priceInfo = st.usePriceLong ? { source: st.priceFile.name, rule: '起日≤基準日≤迄日（迄日含）' } : null;
+      st.staged = staged;
+      st.progress = `試匯入完成：${staged.check.total_rows.toLocaleString()} 列、${staged.check.codes.toLocaleString()} 代碼，耗時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒。`;
+      const act = M.activeImport(data(env));
+      st.stagedDiff = act ? M.diffMasters(await masterRows(env.s, act), M.stagedAsRows(staged)) : null;
+    }), { primary: true })));
+  return form;
+}
+
+function stagedPanel(env, act) {
+  const { btn, guard, ui } = env;
+  const st = ui.master;
+  const c = st.staged.check;
+  const problems = M.activationProblems(st.staged, { confirmMerge: true });
+  const list = (arr, fmt) => (arr.length ? h('ul', null, arr.slice(0, 50).map((x) => h('li', { text: fmt(x) }))) : null);
+  return h('div', null,
+    h('h3', { text: '試匯入檢核結果' }),
+    table(['項目', '結果'], [
+      ['資料列', String(c.total_rows)], ['代碼數', String(c.codes)], ['資料基準日', c.base_date || '未填'],
+      ['代碼錯誤（阻止啟用）', String(c.code_error_count)], ['同代碼內容矛盾（阻止啟用）', String(c.conflict_count)],
+      ['完全相同重複（確認後合併）', String(c.identical_duplicate_count)], ['警告', String(c.warning_count)],
+      ['未知規格單位（規則判定待確認）', Object.entries(c.unknown_units).map(([u, n]) => `${u}（${n}）`).join('、') || '無'],
+      ['代碼轉換找不到', Object.entries(c.unknown_lookup_count).map(([k, n]) => `${M.FIELD_LABEL[k]} ${n}`).join('、') || '無'],
+      ['未映射欄位', c.unmapped_fields.map((k) => M.FIELD_LABEL[k]).join('、') || '無'],
+      ['因此停用之規則欄位', c.disabled_rule_fields.join('、') || '無'],
+      ['缺值筆數', Object.entries(c.missing_values).filter(([, n]) => n).map(([k, n]) => `${M.FIELD_LABEL[k]} ${n}`).join('、') || '無'],
+    ]),
+    c.code_errors.length ? h('div', null, h('h4', { text: '代碼錯誤（前50）' }), list(c.code_errors, (x) => `第${x.row}列：${x.error}`)) : null,
+    c.conflicts.length ? h('div', null, h('h4', { text: '矛盾（前50）' }), list(c.conflicts, (x) => `${x.code}（列 ${x.rows.join(',')}）：${Object.entries(x.diffs).map(([k, v]) => `${M.FIELD_LABEL[k] || k} ${v.join(' ≠ ')}`).join('；')}${x.note ? '（' + x.note + '）' : ''}`)) : null,
+    c.warnings.length ? h('div', null, h('h4', { text: '警告（前50）' }), list(c.warnings, (x) => x)) : null,
+    st.stagedDiff ? diffPanel(env, st.stagedDiff, `目前版本（${act.base_date}）→ 本次試匯入（${c.base_date}）`) : h('p', { class: 'note', text: '目前無已啟用主檔，無差異可比。' }),
+    problems.filter((p) => !p.includes('確認合併')).length
+      ? h('p', { class: 'warn-text', text: '不可啟用：' + problems.join('；') })
+      : h('div', { class: 'toolbar' }, btn('確認並啟用此版本', () => guard(() => doActivate(env)), { primary: true })));
+}
+
+async function doActivate(env) {
+  const st = env.ui.master;
+  const c = st.staged.check;
+  const opId = newId();
+  const merge = h('input', { type: 'checkbox' });
+  const note = h('input', { type: 'text', size: 30 });
+  const v = await dialog('啟用主檔版本', [
+    h('p', { text: `將啟用 ${st.file.name}（基準日 ${c.base_date}，${c.codes} 代碼）。舊版改為「已停用」並保留；來源檔另存為附件。` }),
+    c.identical_duplicate_count ? h('label', null, merge, ` 確認合併 ${c.identical_duplicate_count} 個完全相同重複代碼`) : null,
+    h('br'), h('label', null, '備註 ', note),
+  ], [{ label: '取消', value: null }, { label: '啟用', value: true, primary: true }]);
+  if (!v) return;
+  const sources = [{ role: '主檔', name: st.file.name, bytes: st.file.bytes, mime: st.file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }];
+  if (st.usePriceLong && st.priceFile) sources.push({ role: '價格長表', name: st.priceFile.name, bytes: st.priceFile.bytes });
+  if (st.rcodeFile && M.PRESETS.find((p) => p.key === (st.preset || 'monthly')).lookups) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
+  st.progressEl.textContent = '寫入來源檔與列資料…';
+  const r = await M.activateMaster(env.s, st.staged, sources, { confirmMerge: merge.checked, note: note.value.trim() || null, opId });
+  env.ui.master = { progress: `已啟用（成為未儲存變更，請按「儲存」）。版本 ${r.import_id.slice(0, 8)}。` };
+  const imp = find(env.s.work, 'master_import', r.import_id);
+  if (imp) rowsCache.delete(imp.id);
+}
+
+return { masterRows, masterStatusText, masterTab };
+})();
+
 // ---- ui/main.js ----
 const __m_ui_main_js = (function () {
 // 介面：啟動、狀態列、編輯牌操作、儲存歷程、設定、關於。只呼叫業務模組函式改資料。
@@ -3519,9 +4888,10 @@ const { settingLabel, DEFAULT_SETTINGS } = __m_core_dataset_js;
 const { MIN_KEYWORD_LENGTH } = __m_core_keyword_js;
 const { hasBusinessData } = __m_core_demo_js;
 const { casesTab, meetingsTab } = __m_ui_casesView_js;
+const { masterTab, masterStatusText } = __m_ui_masterView_js;
 const PROFILE_KEY = 'specdrug.profile';
-// 設計建議（待使用者同意）：同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。預設關閉。
-const LOCAL_CLOSED_RELEASE = false;
+// 同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。使用者 2026-11-06 同意（單人使用）。
+const LOCAL_CLOSED_RELEASE = true;
 const LAST_FOLDER_KEY = 'folder:last';
 
 const ui = {
@@ -3919,7 +5289,7 @@ function renderStatusBar() {
   bar.appendChild(h('span', { class: st.tokenUncertain ? 'warn-text' : '', text: tokText }));
   if (st.revision !== undefined && st.revision !== null) bar.appendChild(h('span', { text: `${revLabel(st.revision)}｜${fmtIso(st.savedAt)}` }));
   bar.appendChild(h('span', { class: st.unsaved ? 'warn-text' : '', text: `未儲存變更：${st.unsaved}${st.pendingAudit && !st.unsaved ? `（待寫入稽核 ${st.pendingAudit} 筆）` : ''}` }));
-  bar.appendChild(h('span', { text: '主檔：尚未匯入' }));
+  bar.appendChild(h('span', { text: masterStatusText(s.committed.data) }));
   if (st.newerAvailable) bar.appendChild(h('span', { class: 'chip chip-warn', text: '資料夾有新版，請重新載入' }));
   return bar;
 }
@@ -3954,7 +5324,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -4139,7 +5509,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
