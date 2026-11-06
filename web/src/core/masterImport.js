@@ -13,7 +13,7 @@ export const MASTER_FIELDS = [
   ['group_code', '分組代碼'], ['group_name', '分組名稱'], ['atc_code', 'ATC碼'], ['atc_name', 'ATC名稱'],
   ['dose_code', '核價劑型代碼'], ['dose_name', '核價劑型名稱'], ['ingredient', '成分'], ['strength', '含量'],
   ['multi_mark', '單複方註記'], ['spec_qty', '規格數值'], ['spec_unit', '規格單位'], ['price', '支付價'],
-  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'],
+  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'], ['web_hidden', '不上網註'],
 ];
 export const FIELD_LABEL = Object.fromEntries(MASTER_FIELDS);
 const TARGETS = new Set(MASTER_FIELDS.map((x) => x[0]));
@@ -21,7 +21,7 @@ const CODE_FIELDS = new Set(['group_code', 'atc_code', 'dose_code', 'firm_code']
 // 列資料檔欄位順序
 export const ROW_FIELDS = ['drug_code', 'drug_code_raw', ...MASTER_FIELDS.slice(1).map((x) => x[0]), 'annotation', 'source_row'];
 export const COMPARE_FIELDS = ['drug_name', 'firm', 'firm_code', 'group_code', 'group_name', 'atc_code', 'dose_code', 'dose_name',
-  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no'];
+  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no', 'web_hidden'];
 // 規則欄位所需之主檔欄位；缺少時停用該類規則（第7節第2點）
 export const RULE_FIELD_NEEDS = {
   group_code: ['group_code'], atc_code: ['atc_code'], dose_code: ['dose_code'], multi_mark: ['multi_mark'],
@@ -49,7 +49,7 @@ export const PRESETS = [
     mapping: {
       drug_code: 'CODE', drug_name: '藥品名稱', firm: '藥商名稱', firm_code: '藥商代碼', group_code: '分組代碼', group_name: '分組名稱',
       atc_code: 'ATC7碼', atc_name: 'ATC名稱', dose_code: 'PDOSE', dose_name: '核價劑型', ingredient: '成分名稱', strength: '成分含量',
-      multi_mark: '複方藥品', spec_qty: '規格量', spec_unit: '規格單位', annotation_raw: '必要藥品', license_no: '許可證號',
+      multi_mark: '複方藥品', spec_qty: '規格量', spec_unit: '規格單位', annotation_raw: '必要藥品', license_no: '許可證號', web_hidden: '不上網註',
     },
     note: '支付價欄依資料基準日選 PRICE11510／price11511 等（系統依基準日預選）。必要藥品空白視為0（一般藥品）。',
   },

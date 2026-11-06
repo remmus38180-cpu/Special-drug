@@ -81,3 +81,4 @@ tr.clickable:hover td { background: var(--accent-weak); }
 .pick-item { text-align: left; border-width: 1px; margin: 1px 0; }
 .rule-desc pre, details pre { background: var(--bg); border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; font-size: 13px; }
 .warn-list { margin: 6px 0; }
+.rule-text { background: var(--bg); border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; font-size: 13px; }

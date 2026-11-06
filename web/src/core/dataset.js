@@ -17,6 +17,8 @@ export const DEFAULT_SETTINGS = {
   csv_header_notes: true,
   attachment_max_mb: 50,
   large_scope_threshold: 500,
+  scope_exclude_code_prefixes: 'TPN',
+  scope_exclude_web_hidden: true,
 };
 
 const SETTING_RULES = {
@@ -27,6 +29,8 @@ const SETTING_RULES = {
   csv_header_notes: { type: 'bool', label: 'CSV加說明列' },
   attachment_max_mb: { type: 'int', min: 1, max: 500, label: '附件大小上限（MB）' },
   large_scope_threshold: { type: 'int', min: 1, max: 100000, label: '範圍過大警示門檻（筆）' },
+  scope_exclude_code_prefixes: { type: 'text', max: 200, label: '範圍全域排除：藥品代碼前綴（逗號分隔）' },
+  scope_exclude_web_hidden: { type: 'bool', label: '範圍全域排除：不上網註＝Y' },
 };
 
 export function settingLabel(key) {
@@ -56,6 +60,9 @@ export function validateSettingsPatch(current, patch) {
       if (!Number.isInteger(v) || v < rule.min || v > rule.max) {
         throw new SpecError('BAD_VALUE', `${rule.label}須為 ${rule.min}～${rule.max} 的整數`);
       }
+    } else if (rule.type === 'text') {
+      v = String(raw ?? '').trim();
+      if (v.length > rule.max || /[^A-Za-z0-9,，、\s]/.test(v)) throw new SpecError('BAD_VALUE', `${rule.label}只可填英數字，以逗號分隔`);
     } else {
       if (typeof raw !== 'boolean') throw new SpecError('BAD_VALUE', `${rule.label}須為是／否`);
       v = raw;

@@ -18,6 +18,8 @@ export const E = {
   ANNOTATION_ACTION: ['新增', '改類', '取消', '更正'],
   // B16：系統類別選項只列現行名稱
   CATEGORY: ['不可替代特殊藥品', '特殊藥品'],
+  // 認定版本類別：現行名稱＋取消認定（取消版本）＋待確認（移轉混合文字）
+  REV_CATEGORY: ['不可替代特殊藥品', '特殊藥品', '取消認定', '待確認'],
   METHOD: ['DET', '第25條', '待確認'],
   IMPORT_STATUS: ['試匯入', '已啟用', '已停用', '失敗'],
   SNAPSHOT_STATUS: ['預覽', '已確認', '撤銷'],
@@ -116,7 +118,7 @@ export const SCHEMA = {
     fields: {
       recognition_id: F('ref', { r: 'recognition', req: true, fix: true }),
       revision_no: F('int', { req: true, fix: true }),
-      category: F('enum', { e: E.CATEGORY }), original_category: F('text', { fix: true }),
+      category: F('enum', { e: E.REV_CATEGORY, req: true }), original_category: F('text', { fix: true }),
       scope_text: F('text'), rule: F('json'), conditions_text: F('text'),
       effective_from: F('date'), effective_to: F('date'),
       decision_id: F('ref', { r: 'decision' }), case_id: F('ref', { r: 'case_record' }),
@@ -153,6 +155,8 @@ export const SCHEMA = {
       import_id: F('ref', { r: 'master_import', req: true, fix: true }),
       rule_hash: F('text', { req: true, fix: true }), rule: F('json', { fix: true }),
       evaluated_at: F('text', { fix: true }), match_count: F('int', { fix: true }), pending_count: F('int', { fix: true }),
+      exclusions: F('json', { fix: true }), excluded: F('json', { fix: true }), groups: F('json', { fix: true }),
+      added_codes: F('json', { edit: false }),
       status: F('enum', { e: E.SNAPSHOT_STATUS, def: '預覽', edit: false }),
       confirmed_by: F('text'), confirmed_at: F('text'), note: F('text'),
     },

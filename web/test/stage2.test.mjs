@@ -117,7 +117,7 @@ test('值域、必填、參照、唯一、其他須說明', () => {
   assert.throws(() => insert(d, k, 'recognition_revision', { recognition_id: rr.id, revision_no: 1, category: '必要藥品' }), (e) => e.code === 'BAD_VALUE');
   assert.deepEqual(E.CATEGORY, ['不可替代特殊藥品', '特殊藥品']);
   assert.throws(() => insert(d, k, 'price_action', { drug_code: 'A', revision_id: 'x', price_after: 1.5 }));
-  assert.throws(() => insert(d, k, 'recognition_revision', { recognition_id: rr.id, revision_no: 1, effective_from: '115/8/1' }), (e) => e.code === 'BAD_VALUE');
+  assert.throws(() => insert(d, k, 'recognition_revision', { recognition_id: rr.id, revision_no: 1, category: '特殊藥品', effective_from: '115/8/1' }), (e) => e.code === 'BAD_VALUE');
 });
 
 test('一致性檢查：參照斷裂、重複、金額型別', () => {

@@ -22,9 +22,9 @@ test('T03 選兩個分組：列出聯集並去重', async () => {
   const pv = await R.previewRule({ field: 'group_code', op: 'in', values: ['G1AAA0000001', 'G1CCC0000001', 'G1AAA0000001'] }, rows, imp);
   assert.deepEqual(codes(pv, '符合'), ['A000001100', 'A000002100', 'A000003100', 'A000006100', 'B000004100', 'B000007100']);
   assert.equal(pv.match, 6);
-  // 分組代碼缺值：待確認，不當作不符合（第8.2節）
-  assert.deepEqual(codes(pv, '待確認'), ['C000008100']);
-  assert.equal(pv.reasons['分組代碼缺值'], 1);
+  // 分組代碼空白：視為不符合【使用者 2026-11-07 決定】
+  assert.deepEqual(codes(pv, '待確認'), []);
+  assert.ok(!codes(pv).includes('C000008100'));
   assert.ok(!pv.warnings.some((w) => w.includes('部分涵蓋')));
 });
 
@@ -53,13 +53,12 @@ test('T05 J06B前綴排除J06BB16，再OR其他ATC：括號與排除邏輯正確
 test('T06 分組加規格5mL：排除其他規格，未知單位待確認；提示部分涵蓋分組', async () => {
   const pv = await R.previewRule({ op: 'and', children: [{ field: 'group_code', op: 'eq', value: 'G1AAA0000001' }, { field: 'spec', op: 'eq', value: '5', unit: 'ml' }] }, rows, imp);
   assert.deepEqual(codes(pv, '符合'), ['A000001100']);
-  assert.deepEqual(codes(pv, '待確認'), ['A000003100', 'A000006100', 'C000008100']);
+  assert.deepEqual(codes(pv, '待確認'), ['A000003100', 'A000006100']);
   assert.ok(!codes(pv).includes('A000002100'));
   assert.ok(pv.warnings.some((w) => w.includes('部分涵蓋分組：G1AAA0000001')));
   assert.equal(pv.groups[0].partial, true);
   assert.equal(pv.reasons['規格單位未知或無換算'], 1);
-  assert.equal(pv.reasons['規格缺值'], 2);
-  assert.equal(pv.reasons['分組代碼缺值'], 1);
+  assert.equal(pv.reasons['規格缺值'], 1);
   // 數值比較以十進位，不受浮點影響
   const pv2 = await R.previewRule({ field: 'spec', op: 'eq', value: '5.0', unit: 'ML' }, rows, imp);
   assert.deepEqual(codes(pv2, '符合'), ['A000001100']);
@@ -76,7 +75,7 @@ test('T07 跨品項條件尚未人工確認：不自動當作全部符合，列�
   assert.ok(issues.some((x) => x.includes('跨品項')));
   const pv = await R.previewRule({ op: 'and', children: [{ field: 'group_code', op: 'eq', value: 'G1CCC0000001' }, ast] }, rows, imp);
   assert.equal(pv.match, 0);
-  assert.deepEqual(codes(pv, '待確認'), ['B000004100', 'B000007100', 'C000008100']);
+  assert.deepEqual(codes(pv, '待確認'), ['B000004100', 'B000007100']);
   assert.ok(pv.warnings.some((w) => w.includes('人工條件')));
 });
 

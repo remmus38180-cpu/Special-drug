@@ -134,6 +134,8 @@ export class Evaluator {
     if (f.type === 'quantity') return this.qty(node, drug);
     let val = drug[f.col];
     val = val === null || val === undefined ? '' : String(val).trim();
+    // 分組代碼空白直接視為不符合【使用者 2026-11-07 決定】；其他欄位缺值仍待確認
+    if (!val && node.field === 'group_code') return [FALSE, '分組代碼空白（視為不符合）'];
     if (!val) return [UNKNOWN, `${f.label}缺值`];
     let ok;
     if (op === 'eq') ok = val === node.value.trim();
@@ -208,7 +210,21 @@ export function pendingReason(path) {
 }
 
 // 範圍預覽：rows＝loadMasterRows() 結果；imp＝主檔版本紀錄（取停用欄位與已知單位）
-export async function previewRule(rule, rows, imp, { threshold = 500, conversions } = {}) {
+// 範圍全域排除【使用者 2026-11-07 決定】：藥品代碼前綴（預設 TPN）、不上網註＝Y
+export function exclusionOf(settings) {
+  const prefixes = String((settings && settings.scope_exclude_code_prefixes) ?? 'TPN').split(/[\s,，、]+/).map((x) => x.trim()).filter(Boolean);
+  return { code_prefixes: prefixes, web_hidden_y: settings ? settings.scope_exclude_web_hidden !== false : true };
+}
+
+export function excludedReason(d, ex) {
+  if (!ex) return null;
+  const p = ex.code_prefixes.find((x) => String(d.drug_code).startsWith(x));
+  if (p) return `代碼前綴${p}`;
+  if (ex.web_hidden_y && String(d.web_hidden ?? '').trim().toUpperCase() === 'Y') return '不上網註＝Y';
+  return null;
+}
+
+export async function previewRule(rule, rows, imp, { threshold = 500, conversions, exclusions } = {}) {
   validateRule(rule);
   if (!imp || imp.status !== '已啟用') throw new SpecError('MASTER_NOT_ACTIVE', '規則預覽須使用已啟用之主檔版本');
   const disabled = (imp.check && imp.check.disabled_rule_fields) || [];
@@ -217,10 +233,16 @@ export async function previewRule(rule, rows, imp, { threshold = 500, conversion
   const ev = new Evaluator({ knownUnits: (imp.check && imp.check.known_units) || [], conversions });
   const members = [];
   const groupTotal = new Map();
+  const excluded = {};
+  const ex = exclusions || null;
+  const webMapped = !ex || !ex.web_hidden_y || [...rows.byCode.values()].some((d) => d.web_hidden !== undefined && d.web_hidden !== null);
   for (const d of rows.byCode.values()) {
+    const xr = excludedReason(d, ex);
     const g = d.group_code;
-    if (g) groupTotal.set(g, (groupTotal.get(g) || 0) + 1);
+    if (g && !xr) groupTotal.set(g, (groupTotal.get(g) || 0) + 1);
     const [res, path] = ev.evaluate(rule, d);
+    // 全域排除：只計入原本會列入（符合或待確認）之品項
+    if (xr) { if (res !== FALSE) excluded[xr] = (excluded[xr] || 0) + 1; continue; }
     if (res !== FALSE) {
       members.push({ drug_code: d.drug_code, result: res, path, group_code: g || null, drug_name: d.drug_name || null, firm: d.firm || null,
         spec: `${d.spec_qty ?? ''}${d.spec_unit ?? ''}`, source_row: d.source_row ?? null, annotation: d.annotation ?? null });
@@ -244,6 +266,8 @@ export async function previewRule(rule, rows, imp, { threshold = 500, conversion
     for (const k of new Set(m.path.split('；').map(pendingReason))) reasons[k] = (reasons[k] || 0) + 1;
   }
   const warnings = [];
+  if (Object.keys(excluded).length) warnings.push('全域排除（不列入範圍）：' + Object.entries(excluded).map(([k, v]) => `${k} ${v}筆`).join('；'));
+  if (!webMapped) warnings.push('此主檔版本未映射「不上網註」，未套用不上網註＝Y之排除');
   if (!members.length) warnings.push('零筆符合，請檢查條件');
   if (members.length > threshold) warnings.push(`符合筆數 ${members.length} 超過警示門檻 ${threshold}，請確認範圍`);
   const partial = [...groups.values()].filter((g) => g.partial).map((g) => g.group_code);
@@ -251,7 +275,8 @@ export async function previewRule(rule, rows, imp, { threshold = 500, conversion
   if (hasManual(rule)) warnings.push('含人工條件（如跨品項關係），相關品項列為待確認，須逐項人工確認');
   if (Object.keys(reasons).length) warnings.push('待確認原因：' + Object.entries(reasons).map(([k, v]) => `${k} ${v}筆`).join('；'));
   return { members, match, pending, groups: [...groups.values()].sort((a, b) => (a.group_code < b.group_code ? -1 : 1)), warnings, reasons,
-    rule_hash: await ruleHash(rule), import_id: imp.id, base_date: imp.base_date };
+    excluded, exclusions: ex ? { ...ex, web_hidden_applied: webMapped } : null,
+    rule_hash: await ruleHash(rule), rule_canonical: canonical(rule), import_id: imp.id, base_date: imp.base_date };
 }
 
 // ---------- 原文規則草稿解析（Excel移轉用）：無法完整解析時以人工條件保存原文，不猜測 ----------
