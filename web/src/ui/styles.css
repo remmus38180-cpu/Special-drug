@@ -82,3 +82,5 @@ tr.clickable:hover td { background: var(--accent-weak); }
 .rule-desc pre, details pre { background: var(--bg); border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; font-size: 13px; }
 .warn-list { margin: 6px 0; }
 .rule-text { background: var(--bg); border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; font-size: 13px; }
+.alert { border: 2px solid var(--pink-deep); background: var(--pink); padding: 8px 12px; margin: 8px 0; }
+.panel.current { border-left: 6px solid var(--accent-deep); }

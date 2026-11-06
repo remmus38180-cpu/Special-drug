@@ -16,6 +16,7 @@ import { casesTab, meetingsTab } from './casesView.js';
 import { masterTab, masterStatusText } from './masterView.js';
 import { ruleTab } from './ruleView.js';
 import { recognitionTab } from './recognitionView.js';
+import { pricingTab } from './pricingView.js';
 
 const PROFILE_KEY = 'specdrug.profile';
 // 同瀏覽器前一分頁已關閉（navigator.locks 已釋放）時視同已還牌。使用者 2026-11-06 同意（單人使用）。
@@ -452,7 +453,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -639,7 +640,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
