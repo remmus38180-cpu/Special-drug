@@ -6,7 +6,7 @@
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
 <meta name="build-date" content="2026-11-07">
-<meta name="commit" content="a02dba0">
+<meta name="commit" content="55de2e4">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -54,9 +54,16 @@ dialog.dlg { border: 2px solid var(--line); padding: 16px 20px; max-width: 640px
 dialog.dlg::backdrop { background: rgba(40, 40, 40, 0.35); }
 dialog.dlg h2 { font-size: 17px; margin: 0 0 8px; border-bottom: 2px solid var(--accent); }
 .dlg-buttons { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 12px; }
+th.sortable { cursor: pointer; }
+th[aria-sort="ascending"]::after { content: " ▲"; }
+th[aria-sort="descending"]::after { content: " ▼"; }
+.print-only { display: none; }
+@page { margin: 14mm 12mm 18mm; @bottom-right { content: "第 " counter(page) " 頁／共 " counter(pages) " 頁"; font-size: 9pt; } }
 @media print {
-  .toolbar, .tabs, button { display: none; }
-  .statusbar { position: static; }
+  .toolbar, .tabs, button, .filters, .pager, dialog { display: none !important; }
+  .statusbar, th { position: static; }
+  .print-only { display: block; position: fixed; bottom: 0; left: 0; right: 0; font-size: 9pt; border-top: 1px solid var(--line); background: #fff; padding: 2px 0; }
+  body { background: #fff; }
 }
 .form { display: grid; gap: 6px; }
 .form-row { display: grid; grid-template-columns: 9em 1fr; gap: 8px; align-items: start; }
@@ -101,6 +108,7 @@ tr.clickable:hover td { background: var(--accent-weak); }
 <body>
 <noscript>本程式須啟用JavaScript。</noscript>
 <div id="app"></div>
+<div id="print-footer" class="print-only"></div>
 <script>
 "use strict";
 // ---- ui/dom.js ----
@@ -138,9 +146,38 @@ function clear(el) {
 }
 
 function table(headers, rows) {
-  return h('table', null,
+  const t = h('table', null,
     h('thead', null, h('tr', null, headers.map((x) => h('th', { text: x })))),
     h('tbody', null, rows.map((r) => h('tr', null, r.map((c) => (c instanceof Node ? h('td', null, c) : h('td', { text: c === null || c === undefined ? '' : String(c) })))))));
+  return sortable(t);
+}
+
+// 表頭點選排序（只重排目前畫面已顯示之列，不暗中載入或選取未顯示資料）；數值欄依數值、其餘依文字
+const NUM = /^-?\d+(\.\d+)?$/;
+function sortable(t) {
+  const ths = [...t.querySelectorAll('thead th')];
+  ths.forEach((th, i) => {
+    th.classList.add('sortable');
+    th.setAttribute('tabindex', '0');
+    th.title = '點選依此欄排序';
+    const go = () => {
+      const dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+      ths.forEach((x) => x.removeAttribute('aria-sort'));
+      th.setAttribute('aria-sort', dir);
+      const body = t.querySelector('tbody');
+      const rows = [...body.children];
+      const key = (tr) => (tr.children[i] ? tr.children[i].textContent.trim() : '');
+      rows.sort((a, b) => {
+        const x = key(a); const y = key(b);
+        const c = NUM.test(x.replace(/,/g, '')) && NUM.test(y.replace(/,/g, '')) ? Number(x.replace(/,/g, '')) - Number(y.replace(/,/g, '')) : x.localeCompare(y, 'zh-Hant');
+        return dir === 'ascending' ? c : -c;
+      });
+      for (const r of rows) body.appendChild(r);
+    };
+    th.addEventListener('click', go);
+    th.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  });
+  return t;
 }
 
 // 模態對話框；buttons：[{label, value, primary}]；回傳 Promise<value>（Esc→null）
@@ -168,7 +205,7 @@ function alertBox(title, ...lines) {
   return dialog(title, lines.map((l) => (l instanceof Node ? l : h('p', { text: l }))), [{ label: '確定', value: true, primary: true }]);
 }
 
-return { h, clear, table, dialog, alertBox };
+return { h, clear, table, sortable, dialog, alertBox };
 })();
 
 // ---- ui/files.js ----
@@ -452,7 +489,7 @@ const __m_core_version_js = (function () {
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
 const BUILD_DATE = "2026-11-07";
-const BUILD_COMMIT = "a02dba0";
+const BUILD_COMMIT = "55de2e4";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -9425,6 +9462,14 @@ function boot() {
   ui.check = selfCheck(window);
   window.addEventListener('beforeunload', (e) => {
     if (ui.session && ui.session.hasUnsaved) { e.preventDefault(); e.returnValue = ''; }
+  });
+  // 列印頁尾（第11.5節五）：程式版本、資料revision、列印時間；頁次由列印樣式 @page 提供
+  window.addEventListener('beforeprint', () => {
+    const el = document.getElementById('print-footer');
+    if (!el) return;
+    const s = ui.session;
+    const rev = s && s.current ? `r${String(s.current.revision).padStart(6, '0')}${s.hasUnsaved ? '+未儲存' : ''}` : '（未開啟資料夾）';
+    el.textContent = `特殊藥品管理 v${APP_VERSION}（${BUILD_COMMIT}）｜資料結構 ${SCHEMA_VERSION}｜資料 ${rev}${ui.folderName ? '｜' + ui.folderName : ''}｜列印時間 ${taipeiDisplay(Date.now())}`;
   });
   window.addEventListener('pagehide', () => {
     if (ui.session) ui.session.closing();
