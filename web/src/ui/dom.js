@@ -31,9 +31,38 @@ export function clear(el) {
 }
 
 export function table(headers, rows) {
-  return h('table', null,
+  const t = h('table', null,
     h('thead', null, h('tr', null, headers.map((x) => h('th', { text: x })))),
     h('tbody', null, rows.map((r) => h('tr', null, r.map((c) => (c instanceof Node ? h('td', null, c) : h('td', { text: c === null || c === undefined ? '' : String(c) })))))));
+  return sortable(t);
+}
+
+// 表頭點選排序（只重排目前畫面已顯示之列，不暗中載入或選取未顯示資料）；數值欄依數值、其餘依文字
+const NUM = /^-?\d+(\.\d+)?$/;
+export function sortable(t) {
+  const ths = [...t.querySelectorAll('thead th')];
+  ths.forEach((th, i) => {
+    th.classList.add('sortable');
+    th.setAttribute('tabindex', '0');
+    th.title = '點選依此欄排序';
+    const go = () => {
+      const dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+      ths.forEach((x) => x.removeAttribute('aria-sort'));
+      th.setAttribute('aria-sort', dir);
+      const body = t.querySelector('tbody');
+      const rows = [...body.children];
+      const key = (tr) => (tr.children[i] ? tr.children[i].textContent.trim() : '');
+      rows.sort((a, b) => {
+        const x = key(a); const y = key(b);
+        const c = NUM.test(x.replace(/,/g, '')) && NUM.test(y.replace(/,/g, '')) ? Number(x.replace(/,/g, '')) - Number(y.replace(/,/g, '')) : x.localeCompare(y, 'zh-Hant');
+        return dir === 'ascending' ? c : -c;
+      });
+      for (const r of rows) body.appendChild(r);
+    };
+    th.addEventListener('click', go);
+    th.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  });
+  return t;
 }
 
 // 模態對話框；buttons：[{label, value, primary}]；回傳 Promise<value>（Esc→null）

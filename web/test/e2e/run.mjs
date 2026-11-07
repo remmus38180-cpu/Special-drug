@@ -440,6 +440,21 @@ try {
   check(`T37 Excel移轉：解析預覽、暫存、寫入勾選2列（${wbPath ? '真實活頁簿' : '合成活頁簿'}，${((Date.now() - tMig) / 1000).toFixed(1)} 秒）`, cols[5] === '2' && pvMig.includes('資料列'), (pvMig + ' | ' + batchRow).replace(/\s+/g, ' ').slice(0, 200));
   await p3.getByRole('button', { name: '儲存', exact: true }).click();
   await p3.locator('.statusbar', { hasText: '未儲存變更：0' }).waitFor({ timeout: 30000 });
+  // 收尾：表頭排序、列印頁尾
+  await p3.getByRole('button', { name: '認定', exact: true }).click();
+  if (await p3.getByRole('button', { name: '← 回認定清單' }).count()) await p3.getByRole('button', { name: '← 回認定清單' }).click();
+  const th = p3.locator('th', { hasText: '編號' }).first();
+  const firstCol = async () => p3.locator('table').first().locator('tbody tr td:first-child').allInnerTexts();
+  await th.click();
+  const asc = await firstCol();
+  await th.click();
+  const descRows = await firstCol();
+  check('表頭點選排序（升冪／降冪）', asc.length > 1 && JSON.stringify(asc) === JSON.stringify([...asc].sort((a, b) => a.localeCompare(b, 'zh-Hant'))) && JSON.stringify(descRows) === JSON.stringify([...asc].reverse()), asc.join(',') + ' | ' + descRows.join(','));
+  await p3.emulateMedia({ media: 'print' });
+  await p3.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  const pf = await p3.locator('#print-footer').innerText();
+  check('列印頁尾：程式版本、資料revision、列印時間', /v0\.4\.0/.test(pf) && /資料 r\d{6}/.test(pf) && pf.includes('列印時間'), pf);
+  await p3.emulateMedia({ media: 'screen' });
   await p3.getByRole('button', { name: '首頁', exact: true }).click();
   await p3.getByRole('button', { name: '結束編輯' }).click();
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });

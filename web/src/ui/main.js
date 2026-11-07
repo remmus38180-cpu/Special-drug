@@ -684,6 +684,14 @@ function boot() {
   window.addEventListener('beforeunload', (e) => {
     if (ui.session && ui.session.hasUnsaved) { e.preventDefault(); e.returnValue = ''; }
   });
+  // 列印頁尾（第11.5節五）：程式版本、資料revision、列印時間；頁次由列印樣式 @page 提供
+  window.addEventListener('beforeprint', () => {
+    const el = document.getElementById('print-footer');
+    if (!el) return;
+    const s = ui.session;
+    const rev = s && s.current ? `r${String(s.current.revision).padStart(6, '0')}${s.hasUnsaved ? '+未儲存' : ''}` : '（未開啟資料夾）';
+    el.textContent = `特殊藥品管理 v${APP_VERSION}（${BUILD_COMMIT}）｜資料結構 ${SCHEMA_VERSION}｜資料 ${rev}${ui.folderName ? '｜' + ui.folderName : ''}｜列印時間 ${taipeiDisplay(Date.now())}`;
+  });
   window.addEventListener('pagehide', () => {
     if (ui.session) ui.session.closing();
   });

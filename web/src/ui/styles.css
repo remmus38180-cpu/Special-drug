@@ -43,9 +43,16 @@ dialog.dlg { border: 2px solid var(--line); padding: 16px 20px; max-width: 640px
 dialog.dlg::backdrop { background: rgba(40, 40, 40, 0.35); }
 dialog.dlg h2 { font-size: 17px; margin: 0 0 8px; border-bottom: 2px solid var(--accent); }
 .dlg-buttons { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 12px; }
+th.sortable { cursor: pointer; }
+th[aria-sort="ascending"]::after { content: " ▲"; }
+th[aria-sort="descending"]::after { content: " ▼"; }
+.print-only { display: none; }
+@page { margin: 14mm 12mm 18mm; @bottom-right { content: "第 " counter(page) " 頁／共 " counter(pages) " 頁"; font-size: 9pt; } }
 @media print {
-  .toolbar, .tabs, button { display: none; }
-  .statusbar { position: static; }
+  .toolbar, .tabs, button, .filters, .pager, dialog { display: none !important; }
+  .statusbar, th { position: static; }
+  .print-only { display: block; position: fixed; bottom: 0; left: 0; right: 0; font-size: 9pt; border-top: 1px solid var(--line); background: #fff; padding: 2px 0; }
+  body { background: #fff; }
 }
 .form { display: grid; gap: 6px; }
 .form-row { display: grid; grid-template-columns: 9em 1fr; gap: 8px; align-items: start; }
