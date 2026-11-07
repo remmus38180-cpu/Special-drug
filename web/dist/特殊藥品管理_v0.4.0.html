@@ -6,7 +6,7 @@
 <meta name="version" content="0.4.0">
 <meta name="schema-version" content="1">
 <meta name="build-date" content="2026-11-07">
-<meta name="commit" content="c654fb3">
+<meta name="commit" content="a02dba0">
 <title>特殊藥品管理 v0.4.0</title>
 <style>
 /* 外觀（第10節）：灰白底、深色框線、強調色 Tiffany Blue #81D8CF、輔色淡粉；扁平；按鈕深色外框，按下不變文字與底色。 */
@@ -452,7 +452,7 @@ const __m_core_version_js = (function () {
 const APP_VERSION = '0.4.0';
 const SCHEMA_VERSION = 1;
 const BUILD_DATE = "2026-11-07";
-const BUILD_COMMIT = "c654fb3";
+const BUILD_COMMIT = "a02dba0";
 
 return { APP_VERSION, SCHEMA_VERSION, BUILD_DATE, BUILD_COMMIT };
 })();
@@ -2671,7 +2671,7 @@ const MASTER_FIELDS = [
   ['group_code', '分組代碼'], ['group_name', '分組名稱'], ['atc_code', 'ATC碼'], ['atc_name', 'ATC名稱'],
   ['dose_code', '核價劑型代碼'], ['dose_name', '核價劑型名稱'], ['ingredient', '成分'], ['strength', '含量'],
   ['multi_mark', '單複方註記'], ['spec_qty', '規格數值'], ['spec_unit', '規格單位'], ['price', '支付價'],
-  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'], ['web_hidden', '不上網註'],
+  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'], ['web_hidden', '不上網註'], ['applicant_id', '申請商統一編號'],
 ];
 const FIELD_LABEL = Object.fromEntries(MASTER_FIELDS);
 const TARGETS = new Set(MASTER_FIELDS.map((x) => x[0]));
@@ -2679,7 +2679,7 @@ const CODE_FIELDS = new Set(['group_code', 'atc_code', 'dose_code', 'firm_code']
 // 列資料檔欄位順序
 const ROW_FIELDS = ['drug_code', 'drug_code_raw', ...MASTER_FIELDS.slice(1).map((x) => x[0]), 'annotation', 'source_row'];
 const COMPARE_FIELDS = ['drug_name', 'firm', 'firm_code', 'group_code', 'group_name', 'atc_code', 'dose_code', 'dose_name',
-  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no', 'web_hidden'];
+  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no', 'web_hidden', 'applicant_id'];
 // 規則欄位所需之主檔欄位；缺少時停用該類規則（第7節第2點）
 const RULE_FIELD_NEEDS = {
   group_code: ['group_code'], atc_code: ['atc_code'], dose_code: ['dose_code'], multi_mark: ['multi_mark'],
@@ -2767,6 +2767,49 @@ async function maybeTick(n, tick) {
 }
 
 // DWM_DRUG_RCODE：Map('type|code' → {cname, ename, std_qty})
+// ---------- 藥品許可證檔（食藥署開放資料「藥品許可證」，CSV）→ 申請商統一編號 ----------
+// 使用者 2026-11-07 提供之證別對照：健保代碼第1碼＝證別字母；第3–7碼＝許可證號後5碼（第2碼為變體，不影響）。
+// 證別字母「@」（成藥、醫材、化粧品等）不對應健保藥品代碼。
+const LICENSE_KIND_LETTER = {
+  衛署藥製: 'A', 衛部藥製: 'A', 衛署藥輸: 'B', 衛部藥輸: 'B', 部藥兼食製: 'B', 衛署菌疫製: 'J', 衛部菌疫製: 'J', 衛署菌疫輸: 'K', 衛部菌疫輸: 'K',
+  內衛藥製: 'N', 內衛藥輸: 'P', 內衛菌疫製: 'R', 內衛菌疫輸: 'S', 衛署罕藥輸: 'V', 衛部罕藥輸: 'V', 衛署罕藥製: 'W', 衛部罕藥製: 'W',
+  罕菌疫輸: 'Y', 衛部罕菌疫輸: 'Y', 罕菌疫製: 'Z', 衛部罕菌疫製: 'Z',
+};
+const LETTERS = new Set(Object.values(LICENSE_KIND_LETTER));
+
+function licenseKeyOfCode(code) {
+  const c = String(code || '');
+  if (c.length !== 10 || !LETTERS.has(c[0]) || !/^\d{5}$/.test(c.slice(2, 7))) return null;
+  return c[0] + c.slice(2, 7);
+}
+
+async function loadLicenses(table, { sheet, headerRow = 1, tick } = {}) {
+  const h = readHeaders(table, sheet, headerRow).map((x) => String(x || '').trim());
+  const ci = h.indexOf('許可證字號');
+  const ai = h.indexOf('申請商統一編號');
+  if (ci < 0 || ai < 0) throw new SpecError('LICENSE', '許可證檔缺「許可證字號」或「申請商統一編號」欄，請確認是食藥署藥品許可證開放資料');
+  const map = new Map();
+  const conflicts = new Set();
+  let n = 0; let used = 0;
+  for (const r of table.rows(sheet, { wanted: (c) => c === ci || c === ai })) {
+    if (r.rowNo <= headerRow) continue;
+    n++;
+    const lic = cellText(r.cells.get(ci));
+    const app = cellText(r.cells.get(ai));
+    const m = lic && /^(.+?)字第(\d+)號$/.exec(lic.trim());
+    if (!m || !app) continue;
+    const letter = LICENSE_KIND_LETTER[m[1]];
+    if (!letter) continue;
+    const key = letter + m[2].slice(-5).padStart(5, '0');
+    used++;
+    if (map.has(key) && map.get(key) !== app.trim()) conflicts.add(key);
+    else map.set(key, app.trim());
+    if (tick && n % 5000 === 0) await tick(n);
+  }
+  for (const k of conflicts) map.delete(k);
+  return { map, conflicts, rows: n, used };
+}
+
 async function loadRcode(table, { sheet, headerRow = 1, tick } = {}) {
   const h = readHeaders(table, sheet, headerRow);
   const col = (n) => h.indexOf(n);
@@ -2825,7 +2868,7 @@ function sameRec(a, b) {
 }
 
 // 試匯入：不寫任何檔案，回傳 {records(Map), check}
-async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, knownUnits, unitSource, tick }) {
+async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, knownUnits, unitSource, licenses, tick }) {
   if (!mapping || !mapping.drug_code) throw new SpecError('MAP_REQUIRED', '必須映射「藥品代碼」欄位');
   const bad = Object.keys(mapping).filter((k) => !TARGETS.has(k));
   if (bad.length) throw new SpecError('MAP_UNKNOWN', '未知的映射目標：' + bad.join('、'));
@@ -2851,6 +2894,7 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
   const codeErrors = []; const warnings = []; const identical = []; const conflicts = [];
   const unknownLookup = {}; const unknownUnits = new Map(); const badPrices = [];
   let total = 0; let last = 0;
+  let licHit = 0; let licMiss = 0; let licConflict = 0;
   for (const r of table.rows(sheet, { wanted: (c) => wanted.has(c) })) {
     if (r.rowNo <= headerRow) continue;
     last = r.rowNo;
@@ -2896,6 +2940,11 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
       if (u && !unitSet.has(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
     }
     rec.annotation = mapping.annotation_raw ? normAnnotation(rec.annotation_raw) : null;
+    if (licenses && src.applicant_id === undefined) {
+      const k = licenseKeyOfCode(code);
+      rec.applicant_id = k ? licenses.map.get(k) ?? null : null;
+      if (rec.applicant_id) licHit++; else if (k && licenses.conflicts.has(k)) licConflict++; else licMiss++;
+    }
     rec.source_row = r.rowNo;
     if (!rowsOf.has(code)) rowsOf.set(code, []);
     rowsOf.get(code).push(r.rowNo);
@@ -2915,7 +2964,7 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
   }
   if (last >= EXCEL_MAX_ROW || (price && price.truncated)) warnings.unshift('來源資料達Excel列數上限（1,048,576列），可能已被截斷，請改用完整CSV匯出');
   if (badPrices.length) warnings.push(`支付價無法解析 ${badPrices.length} 列（例：第${badPrices.slice(0, 5).join('、')}列），該列價格留空`);
-  const mapped = new Set([...Object.keys(src), ...Object.keys(lk), ...(price ? ['price'] : [])]);
+  const mapped = new Set([...Object.keys(src), ...Object.keys(lk), ...(price ? ['price'] : []), ...(licenses ? ['applicant_id'] : [])]);
   const disabledRules = Object.entries(RULE_FIELD_NEEDS).filter(([, need]) => need.some((f) => !mapped.has(f))).map(([k]) => k);
   const conflictCodes = new Set(conflicts.map((c) => c.code));
   const check = {
@@ -2932,6 +2981,7 @@ async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, loo
     missing_values: Object.fromEntries([...mapped].filter((f) => f !== 'drug_code').map((f) => [f, [...records.values()].filter((x) => x[f] === null || x[f] === undefined).length])),
     base_date: base,
     known_units: units, unit_source: unitFrom,
+    license: licenses ? { matched: licHit, unmatched: licMiss, ambiguous: licConflict, license_rows: licenses.rows } : null,
   };
   return { records, check, headers, mapping: { ...mapping }, lookups: lk, conflictCodes, sheet: sheet || null, headerRow };
 }
@@ -3053,7 +3103,7 @@ async function fileSha(bytes) {
 }
 
 
-return { MASTER_FIELDS, FIELD_LABEL, ROW_FIELDS, COMPARE_FIELDS, RULE_FIELD_NEEDS, KNOWN_UNITS, unitsFromRcode, PRESETS, suggestPriceColumn, presetMapping, normUnit, normAnnotation, loadRcode, loadPriceLong, stageMaster, activationProblems, rowsFileText, activateMaster, activeImport, listImports, loadMasterRows, diffMasters, stagedAsRows, masterOptions, fileSha };
+return { MASTER_FIELDS, FIELD_LABEL, ROW_FIELDS, COMPARE_FIELDS, RULE_FIELD_NEEDS, KNOWN_UNITS, unitsFromRcode, PRESETS, suggestPriceColumn, presetMapping, normUnit, normAnnotation, LICENSE_KIND_LETTER, licenseKeyOfCode, loadLicenses, loadRcode, loadPriceLong, stageMaster, activationProblems, rowsFileText, activateMaster, activeImport, listImports, loadMasterRows, diffMasters, stagedAsRows, masterOptions, fileSha };
 })();
 
 // ---- core/demo.js ----
@@ -4696,6 +4746,7 @@ const __m_ui_masterView_js = (function () {
 // 主檔匯入畫面（第7節、第10節）：選檔、工作表與標題列、欄位映射、試匯入檢核、差異預覽、啟用、歷史版本。
 const { h, table, dialog, alertBox } = __m_ui_dom_js;
 const M = __m_core_masterImport_js;
+const { readZip } = __m_core_zip_js;
 const { openTable, readHeaders } = __m_core_table_js;
 const { parseDate, rocDisplay } = __m_core_values_js;
 const { newId } = __m_core_util_js;
@@ -4850,6 +4901,17 @@ function mappingForm(env) {
       const bytes = new Uint8Array(await f.arrayBuffer());
       st.rcodeFile = { name: f.name, bytes };
     })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : h('span', { class: 'note', text: '未提供時，已知規格單位用內建清單（14種）；提供時取 type 2 規格單位代碼之英文名。' })),
+    h('div', { class: 'filters' }, fileInput('藥品許可證檔（選用：食藥署開放資料「藥品許可證」CSV，或其下載 zip）', (f) => guard(async () => {
+      let bytes = new Uint8Array(await f.arrayBuffer());
+      let name = f.name;
+      if (name.toLowerCase().endsWith('.zip')) {
+        const z = readZip(bytes);
+        const e = z.entries.find((x) => x.name.toLowerCase().endsWith('.csv'));
+        if (!e) { await alertBox('zip 內無 CSV', '請選食藥署「藥品許可證」資料集下載之 zip 或其中的 CSV。'); return; }
+        bytes = z.bytes(e.name); name = e.name;
+      }
+      st.licenseFile = { name: f.name, inner: name, bytes };
+    })), st.licenseFile ? h('span', { text: st.licenseFile.name }) : h('span', { class: 'note', text: '提供時，依健保代碼對應許可證取得「申請商統一編號」，供「同申請商（同廠牌）」條件使用；未提供時該條件判待確認。' })),
     h('div', { class: 'toolbar' }, btn('試匯入（不改目前主檔）', () => guard(async () => {
       const mapping = {};
       for (const [k, s] of Object.entries(sel)) if (s.value) mapping[k] = s.value;
@@ -4869,8 +4931,13 @@ function mappingForm(env) {
         price = await M.loadPriceLong(st.priceFile.table, { sheet: st.priceFile.table.sheets[0], cols: { code: 'DRUG_CODE', from: 'PAY_S_DATE', to: 'PAY_E_DATE', price: 'PAY_PRICE' }, baseDate: iso, tick: prog('讀取價格長表') });
         delete mapping.price;
       }
+      let licenses = null;
+      if (st.licenseFile) {
+        const lt = openTable(st.licenseFile.inner, st.licenseFile.bytes);
+        licenses = await M.loadLicenses(lt, { sheet: lt.sheets[0], tick: prog('讀取許可證檔') });
+      }
       const t0 = Date.now();
-      const staged = await M.stageMaster({ table: st.table, sheet: st.sheet, headerRow: st.headerRow, mapping, baseDate: iso, lookups: preset.lookups || null, rcode, price, tick: prog('試匯入') });
+      const staged = await M.stageMaster({ table: st.table, sheet: st.sheet, headerRow: st.headerRow, mapping, baseDate: iso, lookups: preset.lookups || null, rcode, price, licenses, tick: prog('試匯入') });
       staged.priceInfo = st.usePriceLong ? { source: st.priceFile.name, rule: '起日≤基準日≤迄日（迄日含）' } : null;
       st.staged = staged;
       st.progress = `試匯入完成：${staged.check.total_rows.toLocaleString()} 列、${staged.check.codes.toLocaleString()} 代碼，耗時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒。`;
@@ -4892,6 +4959,7 @@ function stagedPanel(env, act) {
       ['資料列', String(c.total_rows)], ['代碼數', String(c.codes)], ['資料基準日', c.base_date || '未填'],
       ['代碼錯誤（阻止啟用）', String(c.code_error_count)], ['同代碼內容矛盾（阻止啟用）', String(c.conflict_count)],
       ['完全相同重複（確認後合併）', String(c.identical_duplicate_count)], ['警告', String(c.warning_count)],
+      ['申請商統編（許可證對應）', c.license ? `對到 ${c.license.matched.toLocaleString()}、對不到 ${c.license.unmatched.toLocaleString()}、不明確 ${c.license.ambiguous}` : '未提供許可證檔'],
       ['已知規格單位來源', `${c.unit_source}（${c.known_units.length} 種）`],
       ['未知規格單位（規則判定待確認）', Object.entries(c.unknown_units).map(([u, n]) => `${u}（${n}）`).join('、') || '無'],
       ['代碼轉換找不到', Object.entries(c.unknown_lookup_count).map(([k, n]) => `${M.FIELD_LABEL[k]} ${n}`).join('、') || '無'],
@@ -4923,6 +4991,7 @@ async function doActivate(env) {
   const sources = [{ role: '主檔', name: st.file.name, bytes: st.file.bytes, mime: st.file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }];
   if (st.usePriceLong && st.priceFile) sources.push({ role: '價格長表', name: st.priceFile.name, bytes: st.priceFile.bytes });
   if (st.rcodeFile) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
+  if (st.licenseFile) sources.push({ role: '許可證檔', name: st.licenseFile.inner, bytes: st.licenseFile.bytes });
   st.progressEl.textContent = '寫入來源檔與列資料…';
   const r = await M.activateMaster(env.s, st.staged, sources, { confirmMerge: merge.checked, note: note.value.trim() || null, opId });
   env.ui.master = { progress: `已啟用（成為未儲存變更，請按「儲存」）。版本 ${r.import_id.slice(0, 8)}。` };
@@ -4956,10 +5025,11 @@ const FIELDS = {
   firm: { label: '藥商名稱', type: 'text', col: 'firm' },
   ingredient: { label: '成分', type: 'text', col: 'ingredient' },
   spec: { label: '規格', type: 'quantity', col: ['spec_qty', 'spec_unit'] },
+  applicant_id: { label: '申請商統編', type: 'text', col: 'applicant_id' },
 };
 const TEXT_OPS = { eq: '等於', ne: '不等於', in: '屬於', not_in: '不屬於', starts_with: '前綴為', not_starts_with: '前綴非' };
 const QTY_OPS = { eq: '=', ne: '≠', gt: '>', ge: '≥', lt: '<', le: '≤' };
-const LOGIC_OPS = { and: '全部符合', or: '任一符合', not: '排除' };
+const LOGIC_OPS = { and: '全部符合', or: '任一符合', not: '排除', same_applicant: '同申請商另有品項符合' };
 
 function err(path, msg) {
   return new SpecError('RULE', `${path}：${msg}`);
@@ -4982,6 +5052,13 @@ function validateRule(node, path = '根') {
   if (op === 'not') {
     if (!node.child) throw err(path, '排除條件缺少內容');
     validateRule(node.child, `${path}/排除`);
+    only(node, ['op', 'child'], path);
+    return;
+  }
+  if (op === 'same_applicant') {
+    // 跨品項條件：同申請商（統編，取自藥品許可證檔）另有其他品項符合子條件【使用者 2026-11-07：同廠牌＝同申請商】
+    if (!node.child) throw err(path, '同申請商條件缺少子條件');
+    validateRule(node.child, `${path}/同申請商`);
     only(node, ['op', 'child'], path);
     return;
   }
@@ -5012,13 +5089,14 @@ function validateRule(node, path = '根') {
 function fieldsUsed(node, out = new Set()) {
   if (node.op === 'and' || node.op === 'or') node.children.forEach((c) => fieldsUsed(c, out));
   else if (node.op === 'not') fieldsUsed(node.child, out);
+  else if (node.op === 'same_applicant') { fieldsUsed(node.child, out); }
   else if (node.op !== 'manual') out.add(node.field);
   return out;
 }
 
 function hasManual(node) {
   if (node.op === 'and' || node.op === 'or') return node.children.some(hasManual);
-  if (node.op === 'not') return hasManual(node.child);
+  if (node.op === 'not' || node.op === 'same_applicant') return hasManual(node.child);
   return node.op === 'manual';
 }
 
@@ -5042,8 +5120,35 @@ class Evaluator {
     }
   }
 
+  // 跨品項條件用：主檔列（{byCode}）；依申請商統編建索引
+  setRows(rows) {
+    this.byApplicant = new Map();
+    for (const d of rows.byCode.values()) {
+      const k = d.applicant_id ? String(d.applicant_id).trim() : '';
+      if (!k) continue;
+      if (!this.byApplicant.has(k)) this.byApplicant.set(k, []);
+      this.byApplicant.get(k).push(d);
+    }
+    this.hasApplicant = this.byApplicant.size > 0;
+  }
+
+  sameApplicant(node, drug) {
+    const k = drug.applicant_id ? String(drug.applicant_id).trim() : '';
+    if (!this.byApplicant || !this.hasApplicant) return [UNKNOWN, '申請商統編缺值（主檔版本未匯入藥品許可證檔）'];
+    if (!k) return [UNKNOWN, '申請商統編缺值（許可證對應不到）'];
+    let unknown = null;
+    for (const o of this.byApplicant.get(k) || []) {
+      if (o.drug_code === drug.drug_code) continue;
+      const [r, p] = this.evaluate(node.child, o);
+      if (r === TRUE) return [TRUE, `同申請商（${k}）另有 ${o.drug_code} 符合（${p}）`];
+      if (r === UNKNOWN && !unknown) unknown = `同申請商另有品項待確認：${o.drug_code}（${p}）`;
+    }
+    return unknown ? [UNKNOWN, unknown] : [FALSE, `同申請商（${k}）無其他品項符合`];
+  }
+
   evaluate(node, drug) {
     const op = node.op;
+    if (op === 'same_applicant') return this.sameApplicant(node, drug);
     if (op === 'and') {
       const rs = node.children.map((c) => this.evaluate(c, drug));
       const f = rs.find((r) => r[0] === FALSE);
@@ -5130,6 +5235,7 @@ function describe(node, depth = 0) {
   const op = node.op;
   if (op === 'and' || op === 'or') return `${pad}${LOGIC_OPS[op]}：\n` + node.children.map((c) => describe(c, depth + 1)).join('\n');
   if (op === 'not') return `${pad}排除：\n` + describe(node.child, depth + 1);
+  if (op === 'same_applicant') return `${pad}同申請商（統編）另有其他品項符合：\n` + describe(node.child, depth + 1);
   if (op === 'manual') return `${pad}【人工條件】${node.text}`;
   const f = FIELDS[node.field];
   if (f.type === 'quantity') return `${pad}${f.label} ${QTY_OPS[op]} ${node.value} ${node.unit}`;
@@ -5139,6 +5245,7 @@ function describe(node, depth = 0) {
 // 待確認原因分類（供批次人工確認）
 function pendingReason(path) {
   if (path.includes('人工條件')) return '人工條件';
+  if (path.includes('申請商統編缺值')) return '申請商統編缺值';
   if (path.includes('規格缺值')) return '規格缺值';
   if (path.includes('未知或無確認換算') || path.includes('無法比較大小')) return '規格單位未知或無換算';
   const m = /([^\s；=]+)缺值/.exec(path);
@@ -5167,6 +5274,7 @@ async function previewRule(rule, rows, imp, { threshold = 500, conversions, excl
   const missing = [...fieldsUsed(rule)].filter((f) => disabled.includes(f));
   if (missing.length) throw new SpecError('FIELD_DISABLED', '此主檔版本未映射欄位：' + missing.map((f) => FIELDS[f].label).join('、') + '；相關規則停用，請改用含該欄位的主檔或修改條件');
   const ev = new Evaluator({ knownUnits: (imp.check && imp.check.known_units) || [], conversions });
+  ev.setRows(rows);
   const members = [];
   const groupTotal = new Map();
   const excluded = {};
@@ -5325,7 +5433,7 @@ function parseAtom(toks, i) {
 
 function* atcValues(node) {
   if (node.op === 'and' || node.op === 'or') for (const c of node.children) yield* atcValues(c);
-  else if (node.op === 'not') yield* atcValues(node.child);
+  else if (node.op === 'not' || node.op === 'same_applicant') yield* atcValues(node.child);
   else if (node.field === 'atc_code' && ['eq', 'ne', 'in', 'not_in'].includes(node.op)) yield* (node.value !== undefined ? [node.value] : node.values);
 }
 
@@ -5334,7 +5442,7 @@ function parseRuleText(text) {
   if (text === null || text === undefined || !String(text).trim()) return { ast: null, issues: ['篩選原則空白'] };
   const raw = String(text).trim();
   const t = prep(raw);
-  if (/=\s*0\s*$/.test(t) || /\)\s*=\s*0/.test(t)) issues.push('條件末尾含「=0」，語意不清，不自動解讀（待業務確認）');
+  if (/=\s*0\s*$/.test(t) || /\)\s*=\s*0/.test(t)) issues.push('條件末尾「=0」：原 SPSS 語法「必要藥品_分組=0」即排除該品項（使用者 2026-11-07 提供），本列以人工條件或移轉特例處理，須預覽核對');
   if (t.includes('同廠牌') || (t.includes('且') && t.includes('同'))) {
     issues.push('含跨品項條件（如同廠牌），須人工確認');
     return { ast: { op: 'manual', text: raw }, issues };
@@ -5503,6 +5611,10 @@ function ruleEditor(env, holder, opts) {
       ta.addEventListener('change', () => { node.text = ta.value; changed(); });
       return h('div', { class: 'rule-group rule-manual' }, h('strong', { text: '人工條件（不自動判定，相關品項一律待確認）' }), h('div', null, ta), onDelete ? env.btn('刪除', onDelete) : null);
     }
+    if (node.op === 'same_applicant') {
+      return h('div', { class: 'rule-group' }, h('strong', { text: '同申請商（統編，取自藥品許可證檔）另有其他品項符合下列條件：' }), ' ', onDelete ? env.btn('刪除此條件', onDelete) : null,
+        render(node.child, null, depth + 1));
+    }
     if (node.op === 'not') {
       return h('div', { class: 'rule-group rule-not' }, h('strong', { text: '排除下列條件：' }), ' ', onDelete ? env.btn('刪除排除', onDelete) : null,
         render(node.child, null, depth + 1));
@@ -5513,13 +5625,14 @@ function ruleEditor(env, holder, opts) {
       env.btn('＋條件', () => { node.children.push(newLeaf()); changed(); }),
       env.btn('＋群組', () => { node.children.push({ op: 'or', children: [newLeaf()] }); changed(); }),
       env.btn('＋排除', () => { node.children.push({ op: 'not', child: newLeaf() }); changed(); }),
+      env.btn('＋同申請商另有', () => { node.children.push({ op: 'same_applicant', child: newLeaf() }); changed(); }),
       onDelete ? env.btn('刪除群組', onDelete) : null),
     node.children.length ? null : h('p', { class: 'warn-text', text: '群組內尚無條件（空規則不得當作全選）' }),
     node.children.map((c, i) => render(c, () => { node.children.splice(i, 1); changed(); }, depth + 1)));
   }
 
   function render(node, onDelete, depth = 0) {
-    if (node.op === 'and' || node.op === 'or' || node.op === 'not' || node.op === 'manual') return group(node, onDelete, depth);
+    if (node.op === 'and' || node.op === 'or' || node.op === 'not' || node.op === 'manual' || node.op === 'same_applicant') return group(node, onDelete, depth);
     return leaf(node, onDelete);
   }
 
@@ -5529,7 +5642,7 @@ function ruleEditor(env, holder, opts) {
     if (!holder.rule) { box.appendChild(h('p', { class: 'note', text: '請先選一個範本，再點選條件值。' })); return; }
     const isGroup = ['and', 'or'].includes(holder.rule.op);
     box.appendChild(render(holder.rule, null));
-    if (!isGroup && holder.rule.op !== 'not' && holder.rule.op !== 'manual') {
+    if (!isGroup && !['not', 'manual', 'same_applicant'].includes(holder.rule.op)) {
       box.appendChild(h('div', { class: 'toolbar' }, env.btn('包成群組（加入其他條件）', () => { holder.rule = { op: 'and', children: [holder.rule] }; changed(); })));
     }
     let valid = null;
@@ -8231,6 +8344,401 @@ async function doRestore(env) {
 return { pickZip, backupTab };
 })();
 
+// ---- core/migration.js ----
+const __m_core_migration_js = (function () {
+// 既有 Excel（活頁簿1 final）歷史資料移轉（第12節）：暫存→預覽核對→逐列確認寫入。
+// - 每列保存來源雜湊、工作表、列號、原始欄位、解析結果、待確認問題。
+// - 不直接寫成現行有效資料：認定版本一律為草稿；缺日期／決議／合約標記不完整。
+// - 同來源同列重複暫存／寫入不重複建案；相似列僅列合併候選，不自行合併。未提供之未通過案件不編造。
+const { SpecError } = __m_core_errors_js;
+const { insert, setDedicated, find, must, list } = __m_core_model_js;
+const { parseRuleText, validateRule } = __m_core_rules_js;
+const { parseDate } = __m_core_values_js;
+const { cellText, readHeaders } = __m_core_table_js;
+const { createCase, createMeeting, addAgenda, addDecision, findMeeting } = __m_core_cases_js;
+const { createRecognition, createRevision } = __m_core_recognition_js;
+const { storeBlob, addAttachmentRecord } = __m_core_attachments_js;
+const { sha256Bytes } = __m_core_util_js;
+const COLS = {
+  seq: '調整時公告序號', cancel: '取消註記', group_code: '分組代碼', group_name: '分組名稱',
+  group_item: '分組項目', ingredient: '成分/含量', dosage: '劑型', history: '討論歷程',
+  price_history: '價格異動歷程', category: '類別', side_decision: '附帶決議', ann_name: '調整時公告名稱',
+  rule: '篩選原則', review_10512: '原特殊品項_10512擬訂會議檢討結果', old_rule: '原篩選條件',
+  eff_date: '特殊藥品生效日期', contract_codes: '有簽訂協議為不可替代必要/特殊(藥品代碼)',
+};
+// B16：歷史名稱為改名
+const HIST_TO_STD = { 不可替代必要藥品: '不可替代特殊藥品', 必要藥品: '特殊藥品', 不可替代特殊藥品: '不可替代特殊藥品', 特殊藥品: '特殊藥品' };
+const MEET_DATE = /(\d{2,3})年(\d{1,2})月(?:(\d{1,2})日)?/;
+const CODE_RE = /\b[A-Z][A-Z0-9]\d{6,8}[0-9A-Z]{0,2}\b/g;
+
+const norm = (h) => String(h ?? '').replace(/\s+/g, '');
+
+function txt(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+function matchCols(headers) {
+  const idx = {};
+  for (const [k, name] of Object.entries(COLS)) {
+    const i = headers.findIndex((h) => norm(h).startsWith(norm(name)));
+    if (i >= 0) idx[k] = i;
+  }
+  const missing = ['seq', 'group_code', 'category', 'rule'].filter((k) => idx[k] === undefined).map((k) => COLS[k]);
+  if (missing.length) throw new SpecError('MIG_COLUMNS', '找不到必要欄位：' + missing.join('、') + '；請確認是 final 工作表');
+  return idx;
+}
+
+// 回傳 {std, flags, issues}；混合文字須人工拆解
+function parseCategory(raw) {
+  const flags = [];
+  const issues = [];
+  if (!raw) return { std: '待確認', flags, issues: ['類別空白'] };
+  const t = raw.replace(/\n/g, '/');
+  for (const m of t.matchAll(/(\d{2,3}\.\d{2}\.\d{2})藥價歸零/g)) flags.push(`藥價歸零 ${m[1]}`);
+  if (t.includes('未簽約')) flags.push('未簽約');
+  if (t.includes('取消') || t.includes('(刪)')) flags.push('取消候選');
+  const base = t.replace(/\(.*?\)/g, '').replace(/^[\s/]+|[\s/]+$/g, '');
+  const parts = base.split(/[/→]/).map((x) => x.trim()).filter(Boolean);
+  if (parts.length > 1) return { std: '待確認', flags, issues: [`類別含多個或變更文字「${raw}」，須人工拆解`] };
+  if (!parts.length) return { std: '待確認', flags, issues: [`類別「${raw}」無法對應`] };
+  if (parts[0].startsWith('取消')) return { std: '取消認定', flags, issues };
+  if (/\(取消[^)]*\)/.test(t)) return { std: '待確認', flags, issues: [`類別「${raw}」含取消／改類文字，須人工拆解`] };
+  const std = HIST_TO_STD[parts[0]];
+  if (!std) return { std: '待確認', flags, issues: [`類別「${raw}」無法對應`] };
+  return { std, flags, issues };
+}
+
+// 討論歷程拆成議案候選；每行一個，保留原文；日期只取有明確年月日者（不以年月補日）
+function parseMeetings(text) {
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    let ln = line.trim().replace(/[，,]$/, '').replace(/^\d+\.\s*/, '');
+    if (!ln) continue;
+    let type = '其他';
+    if (ln.includes('藥事小組')) type = '藥事小組';
+    else if (/擬訂|擬定|共擬/.test(ln)) type = '共同擬訂';
+    else if (ln.includes('專家')) type = '專家';
+    const m = MEET_DATE.exec(ln);
+    const date = m && m[3] ? parseDate(`${m[1]}/${m[2]}/${m[3]}`) : null;
+    out.push({ type, name: ln, date, original: line.trim() });
+  }
+  return out;
+}
+
+// 「同廠牌」條件【使用者 2026-11-07 確認，Q05】：同廠牌＝同申請商（統編）；原 SPSS「必要藥品_分組=0」為排除旗標。
+// 1mg 列（本列分組＝原文分組）：同申請商另有同系列其他規格；其他規格列：同申請商有原文分組（1mg）品項（依附帶決議「同一廠商須同時生產1mg併其他高規格」）。
+function sameBrandRule(text, ownGroup, sideDecision) {
+  const t = String(text || '').replace(/＝/g, '=').replace(/\s+/g, ' ');
+  if (!t.includes('同廠牌') || !ownGroup) return null;
+  const x = /分組代碼\s*=\s*([A-Z0-9]+)/.exec(t);
+  const pre = /分組代碼前(\d+)碼\s*=\s*([A-Z0-9]+)/.exec(t);
+  if (!x || !pre) return null;
+  const neqs = [...t.matchAll(/分組代碼\s*<>\s*([A-Z0-9]+)/g)].map((m) => m[1]);
+  const issues = ['「同廠牌」依使用者確認（Q05）改為「同申請商（統編）」條件，須匯入藥品許可證檔；原文「=0」為排除旗標'];
+  let child;
+  if (ownGroup === x[1]) {
+    child = { op: 'and', children: [{ field: 'group_code', op: 'starts_with', value: pre[2] }, ...neqs.map((v) => ({ field: 'group_code', op: 'ne', value: v })), { field: 'group_code', op: 'ne', value: ownGroup }] };
+  } else {
+    child = { field: 'group_code', op: 'eq', value: x[1] };
+    issues.push(`原文分組代碼 ${x[1]} 與本列分組 ${ownGroup} 不同（疑似複製上一列），規則改為本列分組且同申請商有 ${x[1]} 品項${sideDecision ? `（附帶決議：${sideDecision}）` : ''}，請預覽核對`);
+  }
+  const ast = { op: 'and', children: [{ field: 'group_code', op: 'eq', value: ownGroup }, { op: 'same_applicant', child }] };
+  validateRule(ast);
+  return { ast, issues };
+}
+
+function parseRow(raw) {
+  const issues = [];
+  const p = {};
+  for (const k of Object.keys(COLS)) p[k] = txt(raw[k]);
+  const c = parseCategory(p.category);
+  issues.push(...c.issues);
+  p.category_std = c.std;
+  p.category_flags = c.flags;
+  const special = sameBrandRule(p.rule, p.group_code, p.side_decision);
+  if (special) {
+    p.rule_ast = special.ast;
+    issues.push(...special.issues);
+  } else {
+    const r = parseRuleText(p.rule);
+    p.rule_ast = r.ast;
+    issues.push(...r.issues.map((x) => `篩選原則：${x}`));
+  }
+  if (p.eff_date) {
+    p.eff_date_iso = parseDate(p.eff_date);
+    if (!p.eff_date_iso) issues.push(`特殊藥品生效日期「${p.eff_date}」無法解析`);
+  } else {
+    p.eff_date_iso = null;
+    issues.push('特殊藥品生效日期空白（未知，不以會議日補）');
+  }
+  p.meetings = parseMeetings(p.history);
+  if (!p.meetings.length) issues.push('無可辨識的會議紀錄');
+  for (const m of p.meetings) if (m.type === '其他') issues.push(`討論歷程「${m.name}」無法判斷會議類型`);
+  p.contract_code_clues = [...new Set((p.contract_codes || '').match(CODE_RE) || [])].sort();
+  if (p.contract_code_clues.length) issues.push('有協議藥品代碼線索，僅為合約關聯線索，不視為已核驗正式合約');
+  if (p.cancel) issues.push('取消註記：建立取消候選版本，須補依據與日期');
+  const whole = Object.values(raw).filter(Boolean).join(' ');
+  p.not_recognized = /非認列|參考特殊藥品精神/.test(whole);
+  if (p.not_recognized) issues.push('原文註明非認列（參考特殊藥品精神調高），保留價格案件及原文，不建立有效特殊身分');
+  if (p.seq && /重複|包含在/.test(p.seq)) issues.push(`公告序號註記「${p.seq}」，可能與其他列重複，請核對`);
+  if (p.group_item !== null) issues.push('分組項目意義未確認，僅保存原值');
+  return { parsed: p, issues };
+}
+
+// ---------- 暫存（解析，不寫入） ----------
+async function readWorkbook(table, { sheet = 'final', name, bytes } = {}) {
+  if (!table.sheets.includes(sheet)) throw new SpecError('MIG_SHEET', `找不到工作表「${sheet}」`);
+  const headers = readHeaders(table, sheet, 1);
+  const idx = matchCols(headers);
+  const rows = [];
+  for (const r of table.rows(sheet)) {
+    if (r.rowNo === 1) continue;
+    const raw = {};
+    let any = false;
+    for (const [k, i] of Object.entries(idx)) { const v = cellText(r.cells.get(i)); raw[k] = v; if (v !== null) any = true; }
+    if (!any) continue;
+    const { parsed, issues } = parseRow(raw);
+    rows.push({ row_no: r.rowNo, raw, parsed, issues });
+  }
+  return { source_name: name, sha256: await sha256Bytes(bytes), sheet, rows, bytes };
+}
+
+// 寫入暫存區（session）；同來源同工作表同列不重複
+async function stageToSession(session, staged, { opId } = {}) {
+  const st = await storeBlob(session.fs, staged.bytes);
+  return session.run((d, ctx) => {
+    let batch = list(d, 'migration_batch').find((b) => b.sha256 === staged.sha256 && b.sheet === staged.sheet);
+    const first = !batch;
+    if (!batch) batch = insert(d, ctx, 'migration_batch', { source_name: staged.source_name, sha256: staged.sha256, sheet: staged.sheet, row_count: staged.rows.length });
+    const seen = new Set(list(d, 'migration_row').filter((r) => r.source_sha256 === staged.sha256 && r.sheet === staged.sheet).map((r) => r.row_no));
+    let added = 0;
+    for (const r of staged.rows) {
+      if (seen.has(r.row_no)) continue;
+      insert(d, ctx, 'migration_row', { batch_id: batch.id, source_sha256: staged.sha256, sheet: staged.sheet, row_no: r.row_no, raw: r.raw, parsed: r.parsed, issues: r.issues });
+      added++;
+    }
+    if (first) addAttachmentRecord(d, ctx, { orig_name: staged.source_name, sha256: st.sha256, size: st.size, mime: null }, [{ entity: 'migration_batch', entity_id: batch.id }]);
+    return { batch_id: batch.id, new: added, already_staged: staged.rows.length - added, total: staged.rows.length };
+  }, { opId, kind: '移轉暫存', refs: [{ path: st.path, sha256: st.sha256, label: `移轉來源檔 ${staged.source_name}` }] });
+}
+
+function listRows(data, { sha, status } = {}) {
+  return list(data, 'migration_row').filter((r) => (!sha || r.source_sha256 === sha) && (!status || r.status === status))
+    .sort((a, b) => (a.source_sha256 === b.source_sha256 ? a.row_no - b.row_no : a.source_sha256 < b.source_sha256 ? -1 : 1));
+}
+
+// 同公告序號、公告名稱或分組代碼之列，僅列合併候選
+function mergeCandidates(data, sha) {
+  const groups = new Map();
+  for (const r of listRows(data, { sha })) {
+    for (const k of ['seq', 'ann_name', 'group_code']) {
+      const v = r.parsed && r.parsed[k];
+      if (!v) continue;
+      const key = `${k}|${v}`;
+      if (!groups.has(key)) groups.set(key, { key: COLS[k], value: v, rows: [] });
+      groups.get(key).rows.push(r.row_no);
+    }
+  }
+  return [...groups.values()].filter((g) => new Set(g.rows).size > 1);
+}
+
+// ---------- 寫入（使用者確認後） ----------
+function commitRow(data, ctx, rowId, { mergeIntoRecognitionId, ruleOverride } = {}) {
+  const row = must(data, 'migration_row', rowId);
+  if (row.status === '已寫入') throw new SpecError('ALREADY', `第${row.row_no}列已寫入（案件已建立），不重複建案`);
+  if (row.status === '略過') throw new SpecError('SKIPPED', '此列已標示略過');
+  const p = row.parsed;
+  const batch = must(data, 'migration_batch', row.batch_id);
+  const src = `${batch.source_name}#${row.sheet}!${row.row_no}（SHA-256 ${row.source_sha256.slice(0, 12)}）`;
+  const title = p.ann_name || p.group_name || p.group_code || `第${row.row_no}列`;
+  const notes = [];
+  if (p.price_history) notes.push(`價格異動歷程（原文，待人工拆成決議／價格事件）：\n${p.price_history}`);
+  if (p.contract_code_clues && p.contract_code_clues.length) notes.push('協議藥品代碼線索（未核驗）：' + p.contract_code_clues.join('、'));
+  if (p.review_10512) notes.push(`原特殊品項_10512擬訂會議檢討結果（歷史證據）：${p.review_10512}`);
+  if (p.group_item) notes.push(`分組項目原值：${p.group_item}`);
+  if (p.not_recognized) notes.push('原文註明非認列（參考特殊藥品精神調高）');
+  if (row.issues && row.issues.length) notes.push('移轉待確認：' + row.issues.join('；'));
+  const result = { reused_meetings: 0 };
+  const c = createCase(data, ctx, {
+    subject: title, request_item: '特殊藥品認定／調高（歷史移轉）', case_no: `HIST-${row.source_sha256.slice(0, 6)}-${String(row.row_no).padStart(4, '0')}`,
+    completeness: '不完整', pending_fields: 'recv_date,recv_doc_no,applicant', source_ref: src, notes: notes.join('\n\n'),
+  });
+  result.case_id = c.id;
+  (p.meetings || []).forEach((m, i) => {
+    // 同類型、同原文名稱、同日期之會議沿用（同次會議可處理多案）；其他不自動合併
+    let mt = findMeeting(data, { meeting_type: m.type, name: m.name, meeting_date: m.date });
+    if (mt) result.reused_meetings++;
+    else mt = createMeeting(data, ctx, { meeting_type: m.type, name: m.name, meeting_date: m.date, notes: m.date ? '歷史移轉建立' : '歷史移轉建立；日期僅有年月或未知者留空待確認' });
+    const ag = addAgenda(data, ctx, { meeting_id: mt.id, case_id: c.id, subject: title, original_text: m.original, discussion: `移轉候選議案（第${i + 1}次）；決議內容須由價格異動歷程人工拆解` });
+    // 專家會議僅為專家建議（B14）
+    addDecision(data, ctx, { agenda_id: ag.id, nature: m.type === '專家' ? '專家建議' : '會議決議', result: '待確認', result_text: '歷史移轉：結果待人工依原文確認' });
+  });
+  if (p.not_recognized) {
+    result.recognition_id = null;
+  } else if (p.category_std || p.rule_ast) {
+    let recId = mergeIntoRecognitionId;
+    if (recId) must(data, 'recognition', recId);
+    else {
+      const name = list(data, 'recognition').some((r) => r.name === title) ? `${title}（移轉第${row.row_no}列）` : title;
+      recId = createRecognition(data, ctx, { name, description: `歷史移轉：${src}` }).id;
+    }
+    const rule = ruleOverride !== undefined ? ruleOverride : p.rule_ast;
+    const scope = [p.rule && `篩選原則：${p.rule}`, p.old_rule && `原篩選條件（歷史）：${p.old_rule}`, p.group_code && `分組：${p.group_code} ${p.group_name || ''}`,
+      p.ingredient && `成分/含量：${p.ingredient}`, p.dosage && `劑型：${p.dosage}`].filter(Boolean).join('；');
+    const cat = p.category_std !== '取消認定' ? p.category_std : '待確認';
+    const rev = createRevision(data, ctx, recId, {
+      category: cat, original_category: p.category, scope_text: scope, rule: rule || null, conditions_text: p.side_decision,
+      effective_from: p.eff_date_iso, case_id: c.id, completeness: '不完整',
+    });
+    result.recognition_id = recId;
+    result.revision_id = rev.id;
+    if (p.cancel || (p.category_flags || []).includes('取消候選')) {
+      result.cancel_revision_id = createRevision(data, ctx, recId, { category: '取消認定', original_category: p.category, scope_text: '取消候選（歷史移轉）：須補依據與日期', case_id: c.id, completeness: '不完整' }).id;
+    }
+  }
+  setDedicated(data, ctx, 'migration_row', rowId, { status: '已寫入', committed_case_id: c.id, committed_recognition_id: result.recognition_id || null, decided_by: ctx.actor, decided_at: ctx.now },
+    { action: '移轉寫入', fields: ['status', 'committed_case_id', 'committed_recognition_id', 'decided_by', 'decided_at'] });
+  return result;
+}
+
+function skipRow(data, ctx, rowId, reason) {
+  const row = must(data, 'migration_row', rowId);
+  if (!txt(reason)) throw new SpecError('REQUIRED', '略過須填理由');
+  if (row.status !== '待核對') throw new SpecError('BAD_STATE', '只有待核對列可略過');
+  return setDedicated(data, ctx, 'migration_row', rowId, { status: '略過', decided_by: ctx.actor, decided_at: ctx.now }, { action: '移轉略過', reason: txt(reason), fields: ['status', 'decided_by', 'decided_at'] });
+}
+
+function batchSummary(data, batchId) {
+  const rows = list(data, 'migration_row').filter((r) => r.batch_id === batchId);
+  const c = { 待核對: 0, 已寫入: 0, 略過: 0 };
+  for (const r of rows) c[r.status] = (c[r.status] || 0) + 1;
+  return { total: rows.length, ...c, issues: rows.filter((r) => r.issues && r.issues.length).length, batch: find(data, 'migration_batch', batchId) };
+}
+
+return { COLS, matchCols, parseCategory, parseMeetings, sameBrandRule, parseRow, readWorkbook, stageToSession, listRows, mergeCandidates, commitRow, skipRow, batchSummary };
+})();
+
+// ---- ui/migrationView.js ----
+const __m_ui_migrationView_js = (function () {
+// Excel 移轉預覽（第12節）：選活頁簿→解析預覽→暫存（來源檔存為附件）→逐列核對、寫入或略過；合併候選只列不合併；匯出移轉核對清單。
+const { h, table, dialog, alertBox } = __m_ui_dom_js;
+const { formDialog } = __m_ui_forms_js;
+const MG = __m_core_migration_js;
+const R = __m_core_rules_js;
+const { openTable } = __m_core_table_js;
+const { find, list } = __m_core_model_js;
+const { newId } = __m_core_util_js;
+const { taipeiToday } = __m_core_values_js;
+const { exportTable } = __m_ui_exportUI_js;
+const PAGE = 50;
+
+function data(env) {
+  return env.s.mode === 'edit' ? env.s.work : env.s.committed.data;
+}
+
+function shortRule(ast) {
+  if (!ast) return '（無）';
+  const t = R.describe(ast).replace(/\s+/g, ' ');
+  return t.length > 120 ? t.slice(0, 120) + '…' : t;
+}
+
+function migrationTab(env) {
+  const { s, btn, guard, render } = env;
+  env.ui.mig = env.ui.mig || { staged: null, batch: null, status: '待核對', page: 0, picked: new Set(), onlyIssues: false };
+  const st = env.ui.mig;
+  const d = data(env);
+  const fileIn = h('input', { type: 'file', accept: '.xlsx', 'aria-label': '移轉活頁簿', on: { change: (e) => { const f = e.target.files[0]; if (f) guard(async () => {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    st.staged = await MG.readWorkbook(openTable(f.name, bytes), { name: f.name, bytes, sheet: 'final' });
+  }); } } });
+  const box = h('section', { class: 'panel' }, h('h2', { text: 'Excel移轉預覽' }),
+    h('p', { class: 'note', text: '移轉不直接成為現行有效資料：寫入時建立歷史案件、會議議案（結果待確認）及認定草稿版本；缺生效日、決議或合約者標記不完整。同來源同列重複匯入不重複建案；相似列只列合併候選。' }),
+    s.mode === 'edit' ? h('label', null, '活頁簿（工作表 final） ', fileIn) : h('p', { class: 'note', text: '查詢模式僅可檢視暫存資料；匯入須先取得編輯牌。' }));
+  if (st.staged) box.appendChild(previewStaged(env, st.staged));
+  const batches = list(d, 'migration_batch');
+  if (batches.length) {
+    box.appendChild(h('h3', { text: '暫存批次' }));
+    box.appendChild(table(['來源檔', 'SHA-256前12碼', '工作表', '列數', '待核對', '已寫入', '略過', ''], batches.map((b) => {
+      const sm = MG.batchSummary(d, b.id);
+      return [b.source_name, b.sha256.slice(0, 12), b.sheet, String(sm.total), String(sm['待核對']), String(sm['已寫入']), String(sm['略過']), btn(st.batch === b.id ? '核對中' : '核對', () => { st.batch = b.id; st.page = 0; st.picked = new Set(); render(); }, { primary: st.batch === b.id })];
+    })));
+  }
+  const b = st.batch ? find(d, 'migration_batch', st.batch) : null;
+  return h('div', null, box, b ? rowsPanel(env, b) : null);
+}
+
+function previewStaged(env, staged) {
+  const { s, btn, guard } = env;
+  const st = env.ui.mig;
+  const cats = {};
+  let withIssues = 0;
+  for (const r of staged.rows) { cats[r.parsed.category_std] = (cats[r.parsed.category_std] || 0) + 1; if (r.issues.length) withIssues++; }
+  const already = list(data(env), 'migration_row').filter((r) => r.source_sha256 === staged.sha256 && r.sheet === staged.sheet).length;
+  return h('div', { class: 'panel current' }, h('h3', { text: `解析預覽：${staged.source_name}` }),
+    h('p', { text: `資料列 ${staged.rows.length}；類別（B16 對照後）：${Object.entries(cats).map(([k, v]) => `${k} ${v}`).join('、')}；有待確認問題 ${withIssues} 列。` }),
+    already ? h('p', { class: 'warn-text', text: `此來源（同 SHA-256、同工作表）已暫存 ${already} 列；再次暫存只加入新列，不重複建案。` }) : null,
+    s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('暫存（來源檔存為附件）', () => guard(async () => {
+      const r = await MG.stageToSession(s, staged, { opId: newId() });
+      st.batch = r.batch_id; st.staged = null; st.page = 0;
+      await alertBox('已暫存', `新增 ${r.new} 列，已暫存略過 ${r.already_staged} 列（共 ${r.total} 列）。請逐列核對後寫入；記得儲存。`);
+    }), { primary: true }), btn('取消', () => { st.staged = null; env.render(); })) : null);
+}
+
+function rowsPanel(env, b) {
+  const { s, btn, guard, render } = env;
+  const st = env.ui.mig;
+  const d = data(env);
+  const stSel = h('select', { 'aria-label': '移轉列狀態' }, ['', '待核對', '已寫入', '略過'].map((v) => h('option', { value: v, text: v || '（全部）', selected: v === st.status })));
+  const onlyIss = h('input', { type: 'checkbox', checked: st.onlyIssues, 'aria-label': '只看有待確認問題' });
+  let rows = MG.listRows(d, { sha: b.sha256, status: st.status || null }).filter((r) => r.batch_id === b.id || r.source_sha256 === b.sha256);
+  if (st.onlyIssues) rows = rows.filter((r) => r.issues && r.issues.length);
+  const page = rows.slice(st.page * PAGE, (st.page + 1) * PAGE);
+  const t = table(['選', '列', '公告序號', '公告名稱／分組', '類別（原文→對照）', '規則草稿', '待確認問題', '狀態', ''], []);
+  for (const r of page) {
+    const p = r.parsed;
+    const cb = r.status === '待核對' && s.mode === 'edit' ? h('input', { type: 'checkbox', checked: st.picked.has(r.id), 'aria-label': `選第${r.row_no}列`, on: { change: (e) => { if (e.target.checked) st.picked.add(r.id); else st.picked.delete(r.id); } } }) : '';
+    const iss = r.issues && r.issues.length ? h('details', null, h('summary', { text: `${r.issues.length} 項` }), h('ul', null, r.issues.map((x) => h('li', { text: x })))) : '';
+    const ops = s.mode === 'edit' && r.status === '待核對' ? h('span', null,
+      btn('寫入', () => guard(() => s.run((dd, k) => MG.commitRow(dd, k, r.id), { opId: newId(), kind: '移轉寫入' }))),
+      btn('略過', () => guard(async () => { const v = await formDialog(`略過第${r.row_no}列`, [{ key: 'reason', label: '理由', required: true }]); if (v) await s.run((dd, k) => MG.skipRow(dd, k, r.id, v.reason)); }))) : '';
+    t.querySelector('tbody').appendChild(h('tr', null, [cb, String(r.row_no), p.seq || '', `${p.ann_name || ''}｜${p.group_code || ''}`,
+      `${(p.category || '（空白）').replace(/\n/g, ' ')} → ${p.category_std}${p.not_recognized ? '（非認列）' : ''}`, shortRule(p.rule_ast), iss, r.status, ops]
+      .map((x) => (x instanceof Node ? h('td', null, x) : h('td', { text: x })))));
+  }
+  const cands = MG.mergeCandidates(d, b.sha256);
+  return h('section', { class: 'panel' }, h('h3', { text: `核對：${b.source_name}（${rows.length} 列）` }),
+    h('div', { class: 'filters' }, h('label', null, '狀態 ', stSel), h('label', null, onlyIss, ' 只看有待確認問題'),
+      btn('篩選', () => { st.status = stSel.value; st.onlyIssues = onlyIss.checked; st.page = 0; render(); }),
+      btn('匯出移轉核對清單', () => guard(() => exportTable(s, { kind: '移轉核對', condition: `來源 ${b.source_name}；狀態=${st.status || '全部'}`, day: taipeiToday(Date.now()),
+        headers: ['列號', '公告序號', '公告名稱', '分組代碼', '類別原文', '類別對照', '篩選原則原文', '規則草稿', '生效日', '待確認問題', '狀態'],
+        rows: rows.map((r) => [{ n: String(r.row_no) }, r.parsed.seq || '', r.parsed.ann_name || '', r.parsed.group_code || '', r.parsed.category || '', r.parsed.category_std, r.parsed.rule || '', r.parsed.rule_ast ? R.describe(r.parsed.rule_ast).replace(/\s+/g, ' ') : '', r.parsed.eff_date_iso || '', (r.issues || []).join('；'), r.status]) })))),
+    s.mode === 'edit' ? h('div', { class: 'toolbar' }, btn('寫入勾選列', () => guard(() => commitPicked(env)), { primary: true }),
+      h('span', { class: 'note', text: '勾選僅作用於本頁明確勾選之列。' })) : null,
+    rows.length > PAGE ? h('div', { class: 'pager' }, btn('上一頁', () => { st.page = Math.max(0, st.page - 1); render(); }, { disabled: st.page === 0 }),
+      h('span', { text: `第 ${st.page + 1}／${Math.ceil(rows.length / PAGE)} 頁` }),
+      btn('下一頁', () => { st.page += 1; render(); }, { disabled: (st.page + 1) * PAGE >= rows.length })) : null,
+    t,
+    h('h3', { text: `合併候選（${cands.length}）` }),
+    h('p', { class: 'note', text: '同公告序號、公告名稱或分組代碼之列只列出供核對，系統不自行合併；認定範圍是否相同由使用者判斷。' }),
+    cands.length ? table(['依據', '值', '列號'], cands.map((c) => [c.key, c.value.replace(/\n/g, ' '), c.rows.join('、')])) : h('p', { class: 'note', text: '無' }));
+}
+
+async function commitPicked(env) {
+  const st = env.ui.mig;
+  const ids = [...st.picked];
+  if (!ids.length) { await alertBox('未勾選', '請先勾選要寫入的列。'); return; }
+  const ok = await dialog('寫入移轉列', [h('p', { text: `將寫入 ${ids.length} 列：建立歷史案件、會議議案（結果待確認）及認定草稿版本；不產生有效認定、調高或註記。` })],
+    [{ label: '取消', value: false }, { label: '寫入', value: true, primary: true }]);
+  if (!ok) return;
+  await env.s.run((d, k) => ids.map((id) => MG.commitRow(d, k, id)), { opId: newId(), kind: '移轉寫入（批次）' });
+  st.picked = new Set();
+}
+
+return { migrationTab };
+})();
+
 // ---- ui/main.js ----
 const __m_ui_main_js = (function () {
 // 介面：啟動、狀態列、編輯牌操作、儲存歷程、設定、關於。只呼叫業務模組函式改資料。
@@ -8255,6 +8763,7 @@ const { pricingTab } = __m_ui_pricingView_js;
 const { queryTab } = __m_ui_queryView_js;
 const { diffTab } = __m_ui_diffView_js;
 const { backupTab, pickZip } = __m_ui_backupView_js;
+const { migrationTab } = __m_ui_migrationView_js;
 const { backupReadonlyFs } = __m_core_backup_js;
 const X = __m_core_exporter_js;
 const { sha256Bytes } = __m_core_util_js;
@@ -8705,7 +9214,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['backup', '備份還原'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['backup', '備份還原'], ['migration', 'Excel移轉'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -8781,7 +9290,7 @@ function renderHome() {
     h('h2', { text: '首頁' }),
     data.info && data.info.demo ? h('p', { class: 'warn-text', text: '此為示範資料夾：內容為模擬資料，非正式資料。' }) : null,
     h('p', { text: `目前版本 ${revLabel(s.current.revision)}，儲存於 ${fmtIso(s.current.saved_at)}，操作者 ${who(s.current.saved_by)}。` }),
-    h('p', { class: 'note', text: '業務功能（收案、會議、主檔匯入、認定、公告、合約、查詢、匯出、備份還原、移轉）將於後續階段加入。' }),
+    h('p', { class: 'note', text: '功能頁：案件、會議、主檔、規則預覽、認定、公告與合約、品項查詢、差異待辦、備份還原、Excel移轉；資料存於所選資料夾，按「儲存」才成為新版本。' }),
     table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])));
   if (s.mode === 'edit' && !hasBusinessData(data)) {
     box.appendChild(h('h3', { text: '示範資料' }));
@@ -8908,7 +9417,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), backup: () => backupTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), backup: () => backupTab(env), migration: () => migrationTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
