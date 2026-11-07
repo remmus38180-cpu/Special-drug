@@ -391,6 +391,25 @@ try {
   await p3.locator('p', { hasText: '「改名後.xlsx」' }).waitFor();
   const hist = await p3.locator('section.panel').first().innerText();
   check('H16 改名後依SHA-256反查匯出紀錄', hist.includes('為以下匯出') && hist.includes(saved[0]), hist.replace(/\s+/g, ' ').slice(-200));
+  // 階段9：匯出備份、從備份還原
+  await p3.getByRole('button', { name: '備份還原', exact: true }).click();
+  await p3.getByRole('button', { name: '匯出備份' }).click();
+  await p3.locator('dialog.dlg', { hasText: '備份完成' }).waitFor({ timeout: 20000 });
+  const bkName = (await p3.evaluate(() => window.__saved)).at(-1);
+  check('匯出備份：檔名依規則、產生後驗證', /^特藥_備份_\d{8}-\d{6}(-\d+)?_r\d{6}\.zip$/.test(bkName) && (await dlgText(p3)).includes('已重讀逐檔驗證'), bkName);
+  await clickDlg(p3, '確定');
+  const bkBytes = await p3.evaluate(async () => { const root = await navigator.storage.getDirectory(); const d = await root.getDirectoryHandle('exports'); const f = await (await d.getFileHandle('f' + window.__saved.length)).getFile(); return Array.from(new Uint8Array(await f.arrayBuffer())); });
+  const revBefore = await p3.locator('.statusbar').innerText();
+  await p3.getByRole('button', { name: '從備份還原…' }).click();
+  await p3.locator('dialog.dlg').last().locator('input[type=file]').setInputFiles({ name: 'bk.zip', mimeType: 'application/zip', buffer: Buffer.from(bkBytes) });
+  await clickDlg(p3, '確定');
+  await p3.locator('dialog.dlg', { hasText: '確認還原' }).waitFor();
+  await p3.getByLabel('還原原因').fill('E2E 演練');
+  await clickDlg(p3, '還原');
+  await p3.locator('dialog.dlg', { hasText: '還原完成' }).waitFor({ timeout: 20000 });
+  check('T22 從備份還原：成為新revision', (await dlgText(p3)).includes('已還原為 r'), revBefore.replace(/\s+/g, ' ').slice(0, 60));
+  await clickDlg(p3, '確定');
+  await p3.evaluate((b) => { window.__bk = b; }, bkBytes);
   await p3.getByRole('button', { name: '首頁', exact: true }).click();
   await p3.getByRole('button', { name: '結束編輯' }).click();
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });
@@ -409,6 +428,17 @@ try {
   await p3.locator('dialog.dlg').waitFor();
   check('非空資料夾拒絕建立', (await dlgText(p3)).includes('不是本系統資料夾'));
   await clickDlg(p3, '確定');
+  // H11：以備份zip唯讀開啟
+  await p3.getByRole('button', { name: '開啟備份zip（唯讀查詢）' }).click();
+  await p3.locator('dialog.dlg').last().locator('input[type=file]').setInputFiles({ name: 'bk.zip', mimeType: 'application/zip', buffer: Buffer.from(bkBytes) });
+  await clickDlg(p3, '確定');
+  await p3.locator('.statusbar', { hasText: '模式：查詢' }).waitFor({ timeout: 10000 });
+  await p3.getByRole('button', { name: '認定', exact: true }).click();
+  const h11rows = await p3.locator('tr', { hasText: '介面測試認定' }).count();
+  await p3.getByRole('button', { name: '首頁', exact: true }).click();
+  const h11home = await p3.locator('main').innerText();
+  const startBtn = p3.getByRole('button', { name: '開始編輯' });
+  check('H11 備份zip唯讀開啟：可查詢、不可編輯', h11rows === 1 && ((await startBtn.count()) === 0 || await startBtn.isDisabled()), `${h11rows} ${h11home.replace(/\s+/g, ' ').slice(0, 200)}`);
 
   check('H02 參考：無外部請求', external.length === 0, external.join(', '));
   check('無主控台錯誤', consoleErrors.length === 0, consoleErrors.join(' | '));

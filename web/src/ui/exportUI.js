@@ -7,6 +7,10 @@ import { actorText } from '../core/model.js';
 
 const namer = new X.ExportNamer();
 
+export function exportNamer() {
+  return namer;
+}
+
 function data(s) {
   return s.mode === 'edit' ? s.work : s.committed.data;
 }

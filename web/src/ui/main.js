@@ -19,6 +19,8 @@ import { recognitionTab } from './recognitionView.js';
 import { pricingTab } from './pricingView.js';
 import { queryTab } from './queryView.js';
 import { diffTab } from './diffView.js';
+import { backupTab, pickZip } from './backupView.js';
+import { backupReadonlyFs } from '../core/backup.js';
 import * as X from '../core/exporter.js';
 import { sha256Bytes } from '../core/util.js';
 
@@ -188,6 +190,18 @@ async function openHandle(handle, { allowInit } = {}) {
   attach(session, handle.name);
   if (session.mode === 'error') return;
   await offerRecovery();
+}
+
+// H11：以備份zip唯讀開啟（驗證通過才開啟；只能查詢、匯出，不寫入任何資料夾）
+async function openBackupZip() {
+  const f = await pickZip('選擇備份檔（.zip）');
+  if (!f) return;
+  const { fs } = await backupReadonlyFs(f.bytes);
+  const p = loadProfile();
+  const session = new AppSession({ fs, profile: { user: p.user.trim() || '查詢者', pc: p.pc.trim() || '—' }, draftStore: null, locks: null, caps: ui.check });
+  await session.open();
+  session.readonly = (session.readonly || []).concat([`以備份檔「${f.name}」唯讀開啟，不寫入任何資料夾`]);
+  attach(session, `備份 ${f.name}`);
 }
 
 function attach(session, name) {
@@ -457,7 +471,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['backup', '備份還原'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -494,8 +508,9 @@ function renderStart() {
         await openHandle(d, { allowInit: false });
       }), { disabled: !c.canFolder || !c.caps.idb }),
       btn('建立新資料夾（選空資料夾）', () => guard(async () => { const d = await pickFolder(); if (d) await openHandle(d, { allowInit: true }); }), { disabled: !c.canFolder }),
+      btn('開啟備份zip（唯讀查詢）', () => guard(openBackupZip)),
     ),
-    c.canFolder ? null : h('p', { class: 'warn-text', text: '只能唯讀：' + c.readonlyReasons.join('；') + '。開啟備份zip查詢及匯出將於備份還原階段提供。' }),
+    c.canFolder ? null : h('p', { class: 'warn-text', text: '只能唯讀：' + c.readonlyReasons.join('；') + '。可按「開啟備份zip（唯讀查詢）」查詢及匯出。' }),
   );
   return [box, h('section', { class: 'panel' }, h('h2', { text: '啟動自檢' }), renderSelfCheck())];
 }
@@ -659,7 +674,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), backup: () => backupTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
