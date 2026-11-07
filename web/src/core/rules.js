@@ -20,10 +20,11 @@ export const FIELDS = {
   firm: { label: '藥商名稱', type: 'text', col: 'firm' },
   ingredient: { label: '成分', type: 'text', col: 'ingredient' },
   spec: { label: '規格', type: 'quantity', col: ['spec_qty', 'spec_unit'] },
+  applicant_id: { label: '申請商統編', type: 'text', col: 'applicant_id' },
 };
 export const TEXT_OPS = { eq: '等於', ne: '不等於', in: '屬於', not_in: '不屬於', starts_with: '前綴為', not_starts_with: '前綴非' };
 export const QTY_OPS = { eq: '=', ne: '≠', gt: '>', ge: '≥', lt: '<', le: '≤' };
-export const LOGIC_OPS = { and: '全部符合', or: '任一符合', not: '排除' };
+export const LOGIC_OPS = { and: '全部符合', or: '任一符合', not: '排除', same_applicant: '同申請商另有品項符合' };
 
 function err(path, msg) {
   return new SpecError('RULE', `${path}：${msg}`);
@@ -46,6 +47,13 @@ export function validateRule(node, path = '根') {
   if (op === 'not') {
     if (!node.child) throw err(path, '排除條件缺少內容');
     validateRule(node.child, `${path}/排除`);
+    only(node, ['op', 'child'], path);
+    return;
+  }
+  if (op === 'same_applicant') {
+    // 跨品項條件：同申請商（統編，取自藥品許可證檔）另有其他品項符合子條件【使用者 2026-11-07：同廠牌＝同申請商】
+    if (!node.child) throw err(path, '同申請商條件缺少子條件');
+    validateRule(node.child, `${path}/同申請商`);
     only(node, ['op', 'child'], path);
     return;
   }
@@ -76,13 +84,14 @@ export function validateRule(node, path = '根') {
 export function fieldsUsed(node, out = new Set()) {
   if (node.op === 'and' || node.op === 'or') node.children.forEach((c) => fieldsUsed(c, out));
   else if (node.op === 'not') fieldsUsed(node.child, out);
+  else if (node.op === 'same_applicant') { fieldsUsed(node.child, out); }
   else if (node.op !== 'manual') out.add(node.field);
   return out;
 }
 
 export function hasManual(node) {
   if (node.op === 'and' || node.op === 'or') return node.children.some(hasManual);
-  if (node.op === 'not') return hasManual(node.child);
+  if (node.op === 'not' || node.op === 'same_applicant') return hasManual(node.child);
   return node.op === 'manual';
 }
 
@@ -106,8 +115,35 @@ export class Evaluator {
     }
   }
 
+  // 跨品項條件用：主檔列（{byCode}）；依申請商統編建索引
+  setRows(rows) {
+    this.byApplicant = new Map();
+    for (const d of rows.byCode.values()) {
+      const k = d.applicant_id ? String(d.applicant_id).trim() : '';
+      if (!k) continue;
+      if (!this.byApplicant.has(k)) this.byApplicant.set(k, []);
+      this.byApplicant.get(k).push(d);
+    }
+    this.hasApplicant = this.byApplicant.size > 0;
+  }
+
+  sameApplicant(node, drug) {
+    const k = drug.applicant_id ? String(drug.applicant_id).trim() : '';
+    if (!this.byApplicant || !this.hasApplicant) return [UNKNOWN, '申請商統編缺值（主檔版本未匯入藥品許可證檔）'];
+    if (!k) return [UNKNOWN, '申請商統編缺值（許可證對應不到）'];
+    let unknown = null;
+    for (const o of this.byApplicant.get(k) || []) {
+      if (o.drug_code === drug.drug_code) continue;
+      const [r, p] = this.evaluate(node.child, o);
+      if (r === TRUE) return [TRUE, `同申請商（${k}）另有 ${o.drug_code} 符合（${p}）`];
+      if (r === UNKNOWN && !unknown) unknown = `同申請商另有品項待確認：${o.drug_code}（${p}）`;
+    }
+    return unknown ? [UNKNOWN, unknown] : [FALSE, `同申請商（${k}）無其他品項符合`];
+  }
+
   evaluate(node, drug) {
     const op = node.op;
+    if (op === 'same_applicant') return this.sameApplicant(node, drug);
     if (op === 'and') {
       const rs = node.children.map((c) => this.evaluate(c, drug));
       const f = rs.find((r) => r[0] === FALSE);
@@ -194,6 +230,7 @@ export function describe(node, depth = 0) {
   const op = node.op;
   if (op === 'and' || op === 'or') return `${pad}${LOGIC_OPS[op]}：\n` + node.children.map((c) => describe(c, depth + 1)).join('\n');
   if (op === 'not') return `${pad}排除：\n` + describe(node.child, depth + 1);
+  if (op === 'same_applicant') return `${pad}同申請商（統編）另有其他品項符合：\n` + describe(node.child, depth + 1);
   if (op === 'manual') return `${pad}【人工條件】${node.text}`;
   const f = FIELDS[node.field];
   if (f.type === 'quantity') return `${pad}${f.label} ${QTY_OPS[op]} ${node.value} ${node.unit}`;
@@ -203,6 +240,7 @@ export function describe(node, depth = 0) {
 // 待確認原因分類（供批次人工確認）
 export function pendingReason(path) {
   if (path.includes('人工條件')) return '人工條件';
+  if (path.includes('申請商統編缺值')) return '申請商統編缺值';
   if (path.includes('規格缺值')) return '規格缺值';
   if (path.includes('未知或無確認換算') || path.includes('無法比較大小')) return '規格單位未知或無換算';
   const m = /([^\s；=]+)缺值/.exec(path);
@@ -231,6 +269,7 @@ export async function previewRule(rule, rows, imp, { threshold = 500, conversion
   const missing = [...fieldsUsed(rule)].filter((f) => disabled.includes(f));
   if (missing.length) throw new SpecError('FIELD_DISABLED', '此主檔版本未映射欄位：' + missing.map((f) => FIELDS[f].label).join('、') + '；相關規則停用，請改用含該欄位的主檔或修改條件');
   const ev = new Evaluator({ knownUnits: (imp.check && imp.check.known_units) || [], conversions });
+  ev.setRows(rows);
   const members = [];
   const groupTotal = new Map();
   const excluded = {};
@@ -389,7 +428,7 @@ function parseAtom(toks, i) {
 
 function* atcValues(node) {
   if (node.op === 'and' || node.op === 'or') for (const c of node.children) yield* atcValues(c);
-  else if (node.op === 'not') yield* atcValues(node.child);
+  else if (node.op === 'not' || node.op === 'same_applicant') yield* atcValues(node.child);
   else if (node.field === 'atc_code' && ['eq', 'ne', 'in', 'not_in'].includes(node.op)) yield* (node.value !== undefined ? [node.value] : node.values);
 }
 
@@ -398,7 +437,7 @@ export function parseRuleText(text) {
   if (text === null || text === undefined || !String(text).trim()) return { ast: null, issues: ['篩選原則空白'] };
   const raw = String(text).trim();
   const t = prep(raw);
-  if (/=\s*0\s*$/.test(t) || /\)\s*=\s*0/.test(t)) issues.push('條件末尾含「=0」，語意不清，不自動解讀（待業務確認）');
+  if (/=\s*0\s*$/.test(t) || /\)\s*=\s*0/.test(t)) issues.push('條件末尾「=0」：原 SPSS 語法「必要藥品_分組=0」即排除該品項（使用者 2026-11-07 提供），本列以人工條件或移轉特例處理，須預覽核對');
   if (t.includes('同廠牌') || (t.includes('且') && t.includes('同'))) {
     issues.push('含跨品項條件（如同廠牌），須人工確認');
     return { ast: { op: 'manual', text: raw }, issues };

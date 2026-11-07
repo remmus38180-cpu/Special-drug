@@ -1,6 +1,7 @@
 // 主檔匯入畫面（第7節、第10節）：選檔、工作表與標題列、欄位映射、試匯入檢核、差異預覽、啟用、歷史版本。
 import { h, table, dialog, alertBox } from './dom.js';
 import * as M from '../core/masterImport.js';
+import { readZip } from '../core/zip.js';
 import { openTable, readHeaders } from '../core/table.js';
 import { parseDate, rocDisplay } from '../core/values.js';
 import { newId } from '../core/util.js';
@@ -156,6 +157,17 @@ function mappingForm(env) {
       const bytes = new Uint8Array(await f.arrayBuffer());
       st.rcodeFile = { name: f.name, bytes };
     })), st.rcodeFile ? h('span', { text: st.rcodeFile.name }) : h('span', { class: 'note', text: '未提供時，已知規格單位用內建清單（14種）；提供時取 type 2 規格單位代碼之英文名。' })),
+    h('div', { class: 'filters' }, fileInput('藥品許可證檔（選用：食藥署開放資料「藥品許可證」CSV，或其下載 zip）', (f) => guard(async () => {
+      let bytes = new Uint8Array(await f.arrayBuffer());
+      let name = f.name;
+      if (name.toLowerCase().endsWith('.zip')) {
+        const z = readZip(bytes);
+        const e = z.entries.find((x) => x.name.toLowerCase().endsWith('.csv'));
+        if (!e) { await alertBox('zip 內無 CSV', '請選食藥署「藥品許可證」資料集下載之 zip 或其中的 CSV。'); return; }
+        bytes = z.bytes(e.name); name = e.name;
+      }
+      st.licenseFile = { name: f.name, inner: name, bytes };
+    })), st.licenseFile ? h('span', { text: st.licenseFile.name }) : h('span', { class: 'note', text: '提供時，依健保代碼對應許可證取得「申請商統一編號」，供「同申請商（同廠牌）」條件使用；未提供時該條件判待確認。' })),
     h('div', { class: 'toolbar' }, btn('試匯入（不改目前主檔）', () => guard(async () => {
       const mapping = {};
       for (const [k, s] of Object.entries(sel)) if (s.value) mapping[k] = s.value;
@@ -175,8 +187,13 @@ function mappingForm(env) {
         price = await M.loadPriceLong(st.priceFile.table, { sheet: st.priceFile.table.sheets[0], cols: { code: 'DRUG_CODE', from: 'PAY_S_DATE', to: 'PAY_E_DATE', price: 'PAY_PRICE' }, baseDate: iso, tick: prog('讀取價格長表') });
         delete mapping.price;
       }
+      let licenses = null;
+      if (st.licenseFile) {
+        const lt = openTable(st.licenseFile.inner, st.licenseFile.bytes);
+        licenses = await M.loadLicenses(lt, { sheet: lt.sheets[0], tick: prog('讀取許可證檔') });
+      }
       const t0 = Date.now();
-      const staged = await M.stageMaster({ table: st.table, sheet: st.sheet, headerRow: st.headerRow, mapping, baseDate: iso, lookups: preset.lookups || null, rcode, price, tick: prog('試匯入') });
+      const staged = await M.stageMaster({ table: st.table, sheet: st.sheet, headerRow: st.headerRow, mapping, baseDate: iso, lookups: preset.lookups || null, rcode, price, licenses, tick: prog('試匯入') });
       staged.priceInfo = st.usePriceLong ? { source: st.priceFile.name, rule: '起日≤基準日≤迄日（迄日含）' } : null;
       st.staged = staged;
       st.progress = `試匯入完成：${staged.check.total_rows.toLocaleString()} 列、${staged.check.codes.toLocaleString()} 代碼，耗時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒。`;
@@ -198,6 +215,7 @@ function stagedPanel(env, act) {
       ['資料列', String(c.total_rows)], ['代碼數', String(c.codes)], ['資料基準日', c.base_date || '未填'],
       ['代碼錯誤（阻止啟用）', String(c.code_error_count)], ['同代碼內容矛盾（阻止啟用）', String(c.conflict_count)],
       ['完全相同重複（確認後合併）', String(c.identical_duplicate_count)], ['警告', String(c.warning_count)],
+      ['申請商統編（許可證對應）', c.license ? `對到 ${c.license.matched.toLocaleString()}、對不到 ${c.license.unmatched.toLocaleString()}、不明確 ${c.license.ambiguous}` : '未提供許可證檔'],
       ['已知規格單位來源', `${c.unit_source}（${c.known_units.length} 種）`],
       ['未知規格單位（規則判定待確認）', Object.entries(c.unknown_units).map(([u, n]) => `${u}（${n}）`).join('、') || '無'],
       ['代碼轉換找不到', Object.entries(c.unknown_lookup_count).map(([k, n]) => `${M.FIELD_LABEL[k]} ${n}`).join('、') || '無'],
@@ -229,6 +247,7 @@ async function doActivate(env) {
   const sources = [{ role: '主檔', name: st.file.name, bytes: st.file.bytes, mime: st.file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }];
   if (st.usePriceLong && st.priceFile) sources.push({ role: '價格長表', name: st.priceFile.name, bytes: st.priceFile.bytes });
   if (st.rcodeFile) sources.push({ role: '代碼檔', name: st.rcodeFile.name, bytes: st.rcodeFile.bytes });
+  if (st.licenseFile) sources.push({ role: '許可證檔', name: st.licenseFile.inner, bytes: st.licenseFile.bytes });
   st.progressEl.textContent = '寫入來源檔與列資料…';
   const r = await M.activateMaster(env.s, st.staged, sources, { confirmMerge: merge.checked, note: note.value.trim() || null, opId });
   env.ui.master = { progress: `已啟用（成為未儲存變更，請按「儲存」）。版本 ${r.import_id.slice(0, 8)}。` };

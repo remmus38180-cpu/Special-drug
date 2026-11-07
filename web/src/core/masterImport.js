@@ -13,7 +13,7 @@ export const MASTER_FIELDS = [
   ['group_code', '分組代碼'], ['group_name', '分組名稱'], ['atc_code', 'ATC碼'], ['atc_name', 'ATC名稱'],
   ['dose_code', '核價劑型代碼'], ['dose_name', '核價劑型名稱'], ['ingredient', '成分'], ['strength', '含量'],
   ['multi_mark', '單複方註記'], ['spec_qty', '規格數值'], ['spec_unit', '規格單位'], ['price', '支付價'],
-  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'], ['web_hidden', '不上網註'],
+  ['annotation_raw', '必要藥品註記'], ['license_no', '許可證號'], ['web_hidden', '不上網註'], ['applicant_id', '申請商統一編號'],
 ];
 export const FIELD_LABEL = Object.fromEntries(MASTER_FIELDS);
 const TARGETS = new Set(MASTER_FIELDS.map((x) => x[0]));
@@ -21,7 +21,7 @@ const CODE_FIELDS = new Set(['group_code', 'atc_code', 'dose_code', 'firm_code']
 // 列資料檔欄位順序
 export const ROW_FIELDS = ['drug_code', 'drug_code_raw', ...MASTER_FIELDS.slice(1).map((x) => x[0]), 'annotation', 'source_row'];
 export const COMPARE_FIELDS = ['drug_name', 'firm', 'firm_code', 'group_code', 'group_name', 'atc_code', 'dose_code', 'dose_name',
-  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no', 'web_hidden'];
+  'ingredient', 'strength', 'multi_mark', 'spec_qty', 'spec_unit', 'price', 'annotation', 'license_no', 'web_hidden', 'applicant_id'];
 // 規則欄位所需之主檔欄位；缺少時停用該類規則（第7節第2點）
 export const RULE_FIELD_NEEDS = {
   group_code: ['group_code'], atc_code: ['atc_code'], dose_code: ['dose_code'], multi_mark: ['multi_mark'],
@@ -109,6 +109,49 @@ async function maybeTick(n, tick) {
 }
 
 // DWM_DRUG_RCODE：Map('type|code' → {cname, ename, std_qty})
+// ---------- 藥品許可證檔（食藥署開放資料「藥品許可證」，CSV）→ 申請商統一編號 ----------
+// 使用者 2026-11-07 提供之證別對照：健保代碼第1碼＝證別字母；第3–7碼＝許可證號後5碼（第2碼為變體，不影響）。
+// 證別字母「@」（成藥、醫材、化粧品等）不對應健保藥品代碼。
+export const LICENSE_KIND_LETTER = {
+  衛署藥製: 'A', 衛部藥製: 'A', 衛署藥輸: 'B', 衛部藥輸: 'B', 部藥兼食製: 'B', 衛署菌疫製: 'J', 衛部菌疫製: 'J', 衛署菌疫輸: 'K', 衛部菌疫輸: 'K',
+  內衛藥製: 'N', 內衛藥輸: 'P', 內衛菌疫製: 'R', 內衛菌疫輸: 'S', 衛署罕藥輸: 'V', 衛部罕藥輸: 'V', 衛署罕藥製: 'W', 衛部罕藥製: 'W',
+  罕菌疫輸: 'Y', 衛部罕菌疫輸: 'Y', 罕菌疫製: 'Z', 衛部罕菌疫製: 'Z',
+};
+const LETTERS = new Set(Object.values(LICENSE_KIND_LETTER));
+
+export function licenseKeyOfCode(code) {
+  const c = String(code || '');
+  if (c.length !== 10 || !LETTERS.has(c[0]) || !/^\d{5}$/.test(c.slice(2, 7))) return null;
+  return c[0] + c.slice(2, 7);
+}
+
+export async function loadLicenses(table, { sheet, headerRow = 1, tick } = {}) {
+  const h = readHeaders(table, sheet, headerRow).map((x) => String(x || '').trim());
+  const ci = h.indexOf('許可證字號');
+  const ai = h.indexOf('申請商統一編號');
+  if (ci < 0 || ai < 0) throw new SpecError('LICENSE', '許可證檔缺「許可證字號」或「申請商統一編號」欄，請確認是食藥署藥品許可證開放資料');
+  const map = new Map();
+  const conflicts = new Set();
+  let n = 0; let used = 0;
+  for (const r of table.rows(sheet, { wanted: (c) => c === ci || c === ai })) {
+    if (r.rowNo <= headerRow) continue;
+    n++;
+    const lic = cellText(r.cells.get(ci));
+    const app = cellText(r.cells.get(ai));
+    const m = lic && /^(.+?)字第(\d+)號$/.exec(lic.trim());
+    if (!m || !app) continue;
+    const letter = LICENSE_KIND_LETTER[m[1]];
+    if (!letter) continue;
+    const key = letter + m[2].slice(-5).padStart(5, '0');
+    used++;
+    if (map.has(key) && map.get(key) !== app.trim()) conflicts.add(key);
+    else map.set(key, app.trim());
+    if (tick && n % 5000 === 0) await tick(n);
+  }
+  for (const k of conflicts) map.delete(k);
+  return { map, conflicts, rows: n, used };
+}
+
 export async function loadRcode(table, { sheet, headerRow = 1, tick } = {}) {
   const h = readHeaders(table, sheet, headerRow);
   const col = (n) => h.indexOf(n);
@@ -167,7 +210,7 @@ function sameRec(a, b) {
 }
 
 // 試匯入：不寫任何檔案，回傳 {records(Map), check}
-export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, knownUnits, unitSource, tick }) {
+export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDate, lookups, rcode, price, knownUnits, unitSource, licenses, tick }) {
   if (!mapping || !mapping.drug_code) throw new SpecError('MAP_REQUIRED', '必須映射「藥品代碼」欄位');
   const bad = Object.keys(mapping).filter((k) => !TARGETS.has(k));
   if (bad.length) throw new SpecError('MAP_UNKNOWN', '未知的映射目標：' + bad.join('、'));
@@ -193,6 +236,7 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
   const codeErrors = []; const warnings = []; const identical = []; const conflicts = [];
   const unknownLookup = {}; const unknownUnits = new Map(); const badPrices = [];
   let total = 0; let last = 0;
+  let licHit = 0; let licMiss = 0; let licConflict = 0;
   for (const r of table.rows(sheet, { wanted: (c) => wanted.has(c) })) {
     if (r.rowNo <= headerRow) continue;
     last = r.rowNo;
@@ -238,6 +282,11 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
       if (u && !unitSet.has(u)) unknownUnits.set(u, (unknownUnits.get(u) || 0) + 1);
     }
     rec.annotation = mapping.annotation_raw ? normAnnotation(rec.annotation_raw) : null;
+    if (licenses && src.applicant_id === undefined) {
+      const k = licenseKeyOfCode(code);
+      rec.applicant_id = k ? licenses.map.get(k) ?? null : null;
+      if (rec.applicant_id) licHit++; else if (k && licenses.conflicts.has(k)) licConflict++; else licMiss++;
+    }
     rec.source_row = r.rowNo;
     if (!rowsOf.has(code)) rowsOf.set(code, []);
     rowsOf.get(code).push(r.rowNo);
@@ -257,7 +306,7 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
   }
   if (last >= EXCEL_MAX_ROW || (price && price.truncated)) warnings.unshift('來源資料達Excel列數上限（1,048,576列），可能已被截斷，請改用完整CSV匯出');
   if (badPrices.length) warnings.push(`支付價無法解析 ${badPrices.length} 列（例：第${badPrices.slice(0, 5).join('、')}列），該列價格留空`);
-  const mapped = new Set([...Object.keys(src), ...Object.keys(lk), ...(price ? ['price'] : [])]);
+  const mapped = new Set([...Object.keys(src), ...Object.keys(lk), ...(price ? ['price'] : []), ...(licenses ? ['applicant_id'] : [])]);
   const disabledRules = Object.entries(RULE_FIELD_NEEDS).filter(([, need]) => need.some((f) => !mapped.has(f))).map(([k]) => k);
   const conflictCodes = new Set(conflicts.map((c) => c.code));
   const check = {
@@ -274,6 +323,7 @@ export async function stageMaster({ table, sheet, headerRow = 1, mapping, baseDa
     missing_values: Object.fromEntries([...mapped].filter((f) => f !== 'drug_code').map((f) => [f, [...records.values()].filter((x) => x[f] === null || x[f] === undefined).length])),
     base_date: base,
     known_units: units, unit_source: unitFrom,
+    license: licenses ? { matched: licHit, unmatched: licMiss, ambiguous: licConflict, license_rows: licenses.rows } : null,
   };
   return { records, check, headers, mapping: { ...mapping }, lookups: lk, conflictCodes, sheet: sheet || null, headerRow };
 }

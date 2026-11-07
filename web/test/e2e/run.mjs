@@ -2,7 +2,7 @@
 // 因 file:// 下 OPFS 不可用，以本機 http 伺服器提供建置後之單檔HTML。
 // 執行：node test/e2e/run.mjs（需已 node build.mjs；PLAYWRIGHT 模組路徑可由 PW 環境變數指定）
 import { createServer } from 'node:http';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -410,6 +410,36 @@ try {
   check('T22 從備份還原：成為新revision', (await dlgText(p3)).includes('已還原為 r'), revBefore.replace(/\s+/g, ' ').slice(0, 60));
   await clickDlg(p3, '確定');
   await p3.evaluate((b) => { window.__bk = b; }, bkBytes);
+  // 階段10：Excel移轉預覽（合成活頁簿；設定 SPECDRUG_WORKBOOK 時改用真實活頁簿）
+  const { writeXlsx } = await import('../../src/core/xlsxWrite.js');
+  const { COLS } = await import('../../src/core/migration.js');
+  const ks = Object.keys(COLS);
+  const synth = writeXlsx([{ name: 'final', rows: [ks.map((k) => COLS[k]),
+    ks.map((k) => ({ seq: '1', group_code: 'G1AAA0000001', category: '必要藥品', rule: '分組代碼=G1AAA0000001', history: '擬訂會議113年8月' })[k] ?? null),
+    ks.map((k) => ({ seq: '172', group_code: 'N03RUF212116', category: '特殊藥品', rule: '分組代碼=N03RUF212116', price_history: '參考特殊藥品精神調高，非認列', history: '擬訂會議113年8月' })[k] ?? null)] }]);
+  const wbPath = process.env.SPECDRUG_WORKBOOK;
+  const wbBytes = wbPath && existsSync(wbPath) ? readFileSync(wbPath) : Buffer.from(synth);
+  await p3.getByRole('button', { name: 'Excel移轉', exact: true }).click();
+  const tMig = Date.now();
+  await p3.getByLabel('移轉活頁簿').setInputFiles({ name: wbPath ? '活頁簿1.xlsx' : 'synth.xlsx', mimeType: 'application/octet-stream', buffer: wbBytes });
+  await p3.locator('h3', { hasText: '解析預覽' }).waitFor({ timeout: 60000 });
+  const pvMig = await p3.locator('h3', { hasText: '解析預覽' }).locator('..').innerText();
+  await p3.getByRole('button', { name: '暫存（來源檔存為附件）' }).click();
+  await p3.locator('dialog.dlg', { hasText: '已暫存' }).waitFor({ timeout: 60000 });
+  await clickDlg(p3, '確定');
+  const migSec = p3.locator('section.panel', { hasText: '核對：' });
+  await migSec.locator('tbody input[type=checkbox]').first().check();
+  await migSec.locator('tbody input[type=checkbox]').nth(1).check();
+  await p3.getByRole('button', { name: '寫入勾選列' }).click();
+  await clickDlg(p3, '寫入');
+  await p3.waitForTimeout(800);
+  const bRow = p3.locator('tr', { hasText: wbPath ? '活頁簿1.xlsx' : 'synth.xlsx' }).first();
+  await p3.waitForFunction((el) => el && /\t2\t0\t/.test(el.innerText.split('final')[1] || ''), await bRow.elementHandle(), { timeout: 30000 }).catch(() => {});
+  const batchRow = await bRow.innerText();
+  const cols = batchRow.split('\t');
+  check(`T37 Excel移轉：解析預覽、暫存、寫入勾選2列（${wbPath ? '真實活頁簿' : '合成活頁簿'}，${((Date.now() - tMig) / 1000).toFixed(1)} 秒）`, cols[5] === '2' && pvMig.includes('資料列'), (pvMig + ' | ' + batchRow).replace(/\s+/g, ' ').slice(0, 200));
+  await p3.getByRole('button', { name: '儲存', exact: true }).click();
+  await p3.locator('.statusbar', { hasText: '未儲存變更：0' }).waitFor({ timeout: 30000 });
   await p3.getByRole('button', { name: '首頁', exact: true }).click();
   await p3.getByRole('button', { name: '結束編輯' }).click();
   await p3.locator('.statusbar', { hasText: '編輯牌：無人持有' }).waitFor({ timeout: 10000 });

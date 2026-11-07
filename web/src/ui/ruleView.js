@@ -138,6 +138,10 @@ export function ruleEditor(env, holder, opts) {
       ta.addEventListener('change', () => { node.text = ta.value; changed(); });
       return h('div', { class: 'rule-group rule-manual' }, h('strong', { text: '人工條件（不自動判定，相關品項一律待確認）' }), h('div', null, ta), onDelete ? env.btn('刪除', onDelete) : null);
     }
+    if (node.op === 'same_applicant') {
+      return h('div', { class: 'rule-group' }, h('strong', { text: '同申請商（統編，取自藥品許可證檔）另有其他品項符合下列條件：' }), ' ', onDelete ? env.btn('刪除此條件', onDelete) : null,
+        render(node.child, null, depth + 1));
+    }
     if (node.op === 'not') {
       return h('div', { class: 'rule-group rule-not' }, h('strong', { text: '排除下列條件：' }), ' ', onDelete ? env.btn('刪除排除', onDelete) : null,
         render(node.child, null, depth + 1));
@@ -148,13 +152,14 @@ export function ruleEditor(env, holder, opts) {
       env.btn('＋條件', () => { node.children.push(newLeaf()); changed(); }),
       env.btn('＋群組', () => { node.children.push({ op: 'or', children: [newLeaf()] }); changed(); }),
       env.btn('＋排除', () => { node.children.push({ op: 'not', child: newLeaf() }); changed(); }),
+      env.btn('＋同申請商另有', () => { node.children.push({ op: 'same_applicant', child: newLeaf() }); changed(); }),
       onDelete ? env.btn('刪除群組', onDelete) : null),
     node.children.length ? null : h('p', { class: 'warn-text', text: '群組內尚無條件（空規則不得當作全選）' }),
     node.children.map((c, i) => render(c, () => { node.children.splice(i, 1); changed(); }, depth + 1)));
   }
 
   function render(node, onDelete, depth = 0) {
-    if (node.op === 'and' || node.op === 'or' || node.op === 'not' || node.op === 'manual') return group(node, onDelete, depth);
+    if (node.op === 'and' || node.op === 'or' || node.op === 'not' || node.op === 'manual' || node.op === 'same_applicant') return group(node, onDelete, depth);
     return leaf(node, onDelete);
   }
 
@@ -164,7 +169,7 @@ export function ruleEditor(env, holder, opts) {
     if (!holder.rule) { box.appendChild(h('p', { class: 'note', text: '請先選一個範本，再點選條件值。' })); return; }
     const isGroup = ['and', 'or'].includes(holder.rule.op);
     box.appendChild(render(holder.rule, null));
-    if (!isGroup && holder.rule.op !== 'not' && holder.rule.op !== 'manual') {
+    if (!isGroup && !['not', 'manual', 'same_applicant'].includes(holder.rule.op)) {
       box.appendChild(h('div', { class: 'toolbar' }, env.btn('包成群組（加入其他條件）', () => { holder.rule = { op: 'and', children: [holder.rule] }; changed(); })));
     }
     let valid = null;

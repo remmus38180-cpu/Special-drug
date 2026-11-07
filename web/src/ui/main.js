@@ -20,6 +20,7 @@ import { pricingTab } from './pricingView.js';
 import { queryTab } from './queryView.js';
 import { diffTab } from './diffView.js';
 import { backupTab, pickZip } from './backupView.js';
+import { migrationTab } from './migrationView.js';
 import { backupReadonlyFs } from '../core/backup.js';
 import * as X from '../core/exporter.js';
 import { sha256Bytes } from '../core/util.js';
@@ -471,7 +472,7 @@ async function closeFolder() {
 }
 
 function renderTabs() {
-  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['backup', '備份還原'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
+  const tabs = [['home', '首頁'], ['cases', '案件'], ['meetings', '會議'], ['master', '主檔'], ['rule', '規則預覽'], ['recog', '認定'], ['pricing', '公告與合約'], ['query', '品項查詢'], ['diff', '差異待辦'], ['backup', '備份還原'], ['migration', 'Excel移轉'], ['history', '儲存歷程'], ['settings', '設定'], ['about', '關於']];
   return h('nav', { class: 'tabs', 'aria-label': '功能' }, tabs.map(([k, label]) => h('button', {
     type: 'button', class: 'tab' + (ui.tab === k ? ' tab-on' : ''), 'aria-current': ui.tab === k ? 'page' : null, text: label,
     on: { click: () => { ui.tab = k; render(); } },
@@ -547,7 +548,7 @@ function renderHome() {
     h('h2', { text: '首頁' }),
     data.info && data.info.demo ? h('p', { class: 'warn-text', text: '此為示範資料夾：內容為模擬資料，非正式資料。' }) : null,
     h('p', { text: `目前版本 ${revLabel(s.current.revision)}，儲存於 ${fmtIso(s.current.saved_at)}，操作者 ${who(s.current.saved_by)}。` }),
-    h('p', { class: 'note', text: '業務功能（收案、會議、主檔匯入、認定、公告、合約、查詢、匯出、備份還原、移轉）將於後續階段加入。' }),
+    h('p', { class: 'note', text: '功能頁：案件、會議、主檔、規則預覽、認定、公告與合約、品項查詢、差異待辦、備份還原、Excel移轉；資料存於所選資料夾，按「儲存」才成為新版本。' }),
     table(['集合', '筆數'], Object.keys(c).map((k) => [k, c[k].length])));
   if (s.mode === 'edit' && !hasBusinessData(data)) {
     box.appendChild(h('h3', { text: '示範資料' }));
@@ -674,7 +675,7 @@ function render() {
   }
   root.appendChild(renderTabs());
   const env = { s, ui, btn, guard, render };
-  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), backup: () => backupTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
+  const views = { home: renderHome, cases: () => casesTab(env), meetings: () => meetingsTab(env), master: () => masterTab(env), rule: () => ruleTab(env), recog: () => recognitionTab(env), pricing: () => pricingTab(env), query: () => queryTab(env), diff: () => diffTab(env), backup: () => backupTab(env), migration: () => migrationTab(env), history: renderHistory, settings: renderSettings, about: renderAbout };
   root.appendChild(h('main', null, (views[ui.tab] || renderHome)()));
 }
 
